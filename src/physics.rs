@@ -25,21 +25,21 @@ type CollisionList = SmallVec<[Collision; 32]>;
 
 impl HQMServer {
     pub(crate) fn simulate_step(&mut self) -> PhysicsEventList {
-        let mut events: PhysicsEventList = SmallVec::new();
+        let mut events: PhysicsEventList = SmallVec::new(); // +
         let mut players: ArrayVec<(PlayerId, &mut SkaterObject, &mut PlayerInput), 32> =
-            ArrayVec::new();
-        let mut pucks: ArrayVec<(usize, &mut Puck, Point3<f32>), 32> = ArrayVec::new();
+            ArrayVec::new(); // +
+        let mut pucks: ArrayVec<(usize, &mut Puck, Point3<f32>), 32> = ArrayVec::new(); // +
         for (i, p) in self.state.players.players.iter_players_mut() {
             if let Some((_, skater, _)) = &mut p.object {
                 players.push((i, skater, &mut p.input));
             }
-        }
+        } // +
         for (i, p) in self.state.pucks.iter_mut().enumerate() {
             if let Some(p) = p {
                 let old_pos = p.body.pos;
                 pucks.push((i, p, old_pos));
             }
-        }
+        } // +
 
         let mut collisions: CollisionList = SmallVec::new();
         for (i, (_, player, input)) in players.iter_mut().enumerate() {
@@ -329,24 +329,25 @@ fn update_stick(
 }
 
 fn update_player(
-    i: usize,
+    iiiixixixi: usize,
     player: &mut SkaterObject,
     input: &mut PlayerInput,
     physics_config: &PhysicsConfiguration,
     rink: &Rink,
     collisions: &mut CollisionList,
 ) {
-    let linear_velocity_before = player.body.linear_velocity.clone_owned();
-    let angular_velocity_before = player.body.angular_velocity.clone_owned();
+    let linear_velocity_before = player.body.linear_velocity.clone_owned(); // +
+    let angular_velocity_before = player.body.angular_velocity.clone_owned(); // +
 
-    player.body.pos += player.body.linear_velocity;
-    player.body.linear_velocity[1] -= physics_config.gravity;
+    player.body.pos += player.body.linear_velocity; // +
+    player.body.linear_velocity[1] -= physics_config.gravity; // +
     for collision_ball in player.collision_balls.iter_mut() {
-        collision_ball.velocity *= 0.999;
-        collision_ball.pos += &collision_ball.velocity;
-        collision_ball.velocity[1] -= physics_config.gravity;
-    }
-    let feet_pos = player.body.pos - player.body.rot * (player.height * Vector3::y());
+        collision_ball.velocity *= 0.999; // +
+        collision_ball.pos += &collision_ball.velocity; // +
+        collision_ball.velocity[1] -= physics_config.gravity; // +
+    } // +
+
+    let feet_pos = player.body.pos - player.body.rot * (player.height * Vector3::y()); // +?
     if feet_pos[1] < 0.0 {
         // If feet is below ground
         let fwbw_from_client = input.fwbw.clamp(-1.0, 1.0);
@@ -370,7 +371,7 @@ fn update_player(
             // a single frame. This would be way too fast, so we limit the step to a specified max acceleration
 
             player.body.linear_velocity += limit_vector_length(&new_acceleration, max_acceleration);
-        }
+        } // +?
         if input.jump() && !player.jumped_last_frame {
             let diff = if physics_config.limit_jump_speed {
                 (0.025 - player.body.linear_velocity[1]).clamp(0.0, 0.025)
@@ -383,9 +384,9 @@ fn update_player(
                     collision_ball.velocity[1] += diff;
                 }
             }
-        }
+        } // +? changed so the double jump is ok, but not triple-quadruple
     }
-    player.jumped_last_frame = input.jump();
+    player.jumped_last_frame = input.jump(); // +
 
     // Turn player
     let turn = input.turn.clamp(-1.0, 1.0);
@@ -457,7 +458,7 @@ fn update_player(
     for (ib, collision_ball) in player.collision_balls.iter().enumerate() {
         let collision = collision_between_collision_ball_and_rink(collision_ball, rink);
         if let Some((overlap, normal)) = collision {
-            collisions.push(Collision::PlayerRink((i, ib), overlap, normal));
+            collisions.push(Collision::PlayerRink((iiiixixixi, ib), overlap, normal));
         }
     }
     let linear_velocity_before = player.body.linear_velocity.clone_owned();
