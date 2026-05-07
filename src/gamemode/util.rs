@@ -1,6 +1,6 @@
 use crate::game::{PlayerId, Rink, Team};
 use crate::gamemode::ServerPlayersMut;
-use nalgebra::{Point3, Rotation3};
+use glam::{Mat3, Vec3};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -8,7 +8,7 @@ use std::rc::Rc;
 use tracing::info;
 
 pub fn add_players<
-    F1: Fn(Team, usize) -> (Point3<f32>, Rotation3<f32>),
+    F1: Fn(Team, usize) -> (Vec3, Mat3),
     FSpectate: FnMut(PlayerId),
     FJoin: FnMut(PlayerId, Team),
 >(
@@ -29,8 +29,7 @@ pub fn add_players<
         let player_id = player.id;
         let input = player.input();
         let team = player.team();
-        if let Some(x) = team_switch_timer
-            .get_mut(&player_id) {
+        if let Some(x) = team_switch_timer.get_mut(&player_id) {
             *x = x.saturating_sub(1)
         }
         if let Some(team) = team {
@@ -103,37 +102,33 @@ pub enum SpawnPoint {
     Bench,
 }
 
-pub fn get_spawnpoint(
-    rink: &Rink,
-    team: Team,
-    spawn_point: SpawnPoint,
-) -> (Point3<f32>, Rotation3<f32>) {
+pub fn get_spawnpoint(rink: &Rink, team: Team, spawn_point: SpawnPoint) -> (Vec3, Mat3) {
     match team {
         Team::Red => match spawn_point {
             SpawnPoint::Center => {
                 let (z, rot) = ((rink.length / 2.0) + 3.0, 0.0);
-                let pos = Point3::new(rink.width / 2.0, 2.0, z);
-                let rot = Rotation3::from_euler_angles(0.0, rot, 0.0);
+                let pos = Vec3::new(rink.width / 2.0, 2.0, z);
+                let rot = Mat3::from_rotation_y(rot);
                 (pos, rot)
             }
             SpawnPoint::Bench => {
                 let z = (rink.length / 2.0) + 4.0;
-                let pos = Point3::new(0.5, 2.0, z);
-                let rot = Rotation3::from_euler_angles(0.0, 3.0 * FRAC_PI_2, 0.0);
+                let pos = Vec3::new(0.5, 2.0, z);
+                let rot = Mat3::from_rotation_y(3.0 * FRAC_PI_2);
                 (pos, rot)
             }
         },
         Team::Blue => match spawn_point {
             SpawnPoint::Center => {
                 let (z, rot) = ((rink.length / 2.0) - 3.0, PI);
-                let pos = Point3::new(rink.width / 2.0, 2.0, z);
-                let rot = Rotation3::from_euler_angles(0.0, rot, 0.0);
+                let pos = Vec3::new(rink.width / 2.0, 2.0, z);
+                let rot = Mat3::from_rotation_y(rot);
                 (pos, rot)
             }
             SpawnPoint::Bench => {
                 let z = (rink.length / 2.0) - 4.0;
-                let pos = Point3::new(0.5, 2.0, z);
-                let rot = Rotation3::from_euler_angles(0.0, 3.0 * FRAC_PI_2, 0.0);
+                let pos = Vec3::new(0.5, 2.0, z);
+                let rot = Mat3::from_rotation_y(3.0 * FRAC_PI_2);
                 (pos, rot)
             }
         },

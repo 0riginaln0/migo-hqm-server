@@ -2,28 +2,21 @@ use crate::game::PlayerInput;
 use crate::server::{HQMClientVersion, HQMMessage};
 use arraydeque::{ArrayDeque, Wrapping};
 use bytes::{BufMut, BytesMut};
-use nalgebra::storage::Storage;
-use nalgebra::{Matrix3, U1, U3, Vector2, Vector3};
+
+use glam::{Mat3, Vec2, Vec3};
 use std::cmp::min;
 use std::io::Error;
 use std::string::FromUtf8Error;
 
-const UXP: Vector3<f32> = Vector3::new(1.0, 0.0, 0.0);
-const UXN: Vector3<f32> = Vector3::new(-1.0, 0.0, 0.0);
-const UYP: Vector3<f32> = Vector3::new(0.0, 1.0, 0.0);
-const UYN: Vector3<f32> = Vector3::new(0.0, -1.0, 0.0);
-const UZP: Vector3<f32> = Vector3::new(0.0, 0.0, 1.0);
-const UZN: Vector3<f32> = Vector3::new(0.0, 0.0, -1.0);
-
-const TABLE: [[&Vector3<f32>; 3]; 8] = [
-    [&UYP, &UXP, &UZP],
-    [&UYP, &UZP, &UXN],
-    [&UYP, &UZN, &UXP],
-    [&UYP, &UXN, &UZN],
-    [&UZP, &UXP, &UYN],
-    [&UXN, &UZP, &UYN],
-    [&UXP, &UZN, &UYN],
-    [&UZN, &UXN, &UYN],
+const TABLE: [[Vec3; 3]; 8] = [
+    [Vec3::Y, Vec3::X, Vec3::Z],
+    [Vec3::Y, Vec3::Z, Vec3::NEG_X],
+    [Vec3::Y, Vec3::NEG_Z, Vec3::X],
+    [Vec3::Y, Vec3::NEG_X, Vec3::NEG_Z],
+    [Vec3::Z, Vec3::X, Vec3::NEG_Y],
+    [Vec3::NEG_X, Vec3::Z, Vec3::NEG_Y],
+    [Vec3::X, Vec3::NEG_Z, Vec3::NEG_Y],
+    [Vec3::NEG_Z, Vec3::NEG_X, Vec3::NEG_Y],
 ];
 
 const GAME_HEADER: &[u8] = b"Hock";
@@ -118,7 +111,7 @@ impl HQMMessageCodec {
             stick_angle: input_stick_angle,
             turn: input_turn,
             fwbw: input_fwbw,
-            stick: Vector2::new(input_stick_rot_1, input_stick_rot_2),
+            stick: Vec2::new(input_stick_rot_1, input_stick_rot_2),
             head_rot: input_head_rot,
             body_rot: input_body_rot,
             keys: input_keys,
@@ -194,27 +187,27 @@ fn get_player_name(bytes: &[u8]) -> Result<String, FromUtf8Error> {
     })
 }
 
-pub fn convert_matrix_to_network(b: u8, v: &Matrix3<f32>) -> (u32, u32) {
-    let r1 = convert_rot_column_to_network(b, &v.column(1));
-    let r2 = convert_rot_column_to_network(b, &v.column(2));
+pub fn convert_matrix_to_network(b: u8, v: &Mat3) -> (u32, u32) {
+    let r1 = convert_rot_column_to_network(b, v.y_axis);
+    let r2 = convert_rot_column_to_network(b, v.z_axis);
     (r1, r2)
 }
 
 #[allow(dead_code)]
-pub fn convert_matrix_from_network(b: u8, v1: u32, v2: u32) -> Matrix3<f32> {
+pub fn convert_matrix_from_network(b: u8, v1: u32, v2: u32) -> Mat3 {
     let r1 = convert_rot_column_from_network(b, v1);
     let r2 = convert_rot_column_from_network(b, v2);
-    let r0 = r1.cross(&r2);
-    Matrix3::from_columns(&[r0, r1, r2])
+    let r0 = r1.cross(r2);
+    Mat3::from_cols(r0, r1, r2)
 }
 
 #[allow(dead_code)]
-fn convert_rot_column_from_network(b: u8, v: u32) -> Vector3<f32> {
+fn convert_rot_column_from_network(b: u8, v: u32) -> Vec3 {
     let start = v & 7;
 
-    let mut temp1 = *TABLE[start as usize][0];
-    let mut temp2 = *TABLE[start as usize][1];
-    let mut temp3 = *TABLE[start as usize][2];
+    let mut temp1 = TABLE[start as usize][0];
+    let mut temp2 = TABLE[start as usize][1];
+    let mut temp3 = TABLE[start as usize][2];
     let mut pos = 3;
     while pos < b {
         let step = (v >> pos) & 3;
@@ -247,10 +240,7 @@ fn convert_rot_column_from_network(b: u8, v: u32) -> Vector3<f32> {
     (temp1 + temp2 + temp3).normalize()
 }
 
-fn convert_rot_column_to_network<S: Storage<f32, U3, U1>>(
-    b: u8,
-    v: &nalgebra::Matrix<f32, U3, U1, S>,
-) -> u32 {
+fn convert_rot_column_to_network(b: u8, v: Vec3) -> u32 {
     let mut res = 0;
 
     if v[0] < 0.0 {
@@ -262,19 +252,19 @@ fn convert_rot_column_to_network<S: Storage<f32, U3, U1>>(
     if v[1] < 0.0 {
         res |= 4
     }
-    let mut temp1 = *TABLE[res as usize][0];
-    let mut temp2 = *TABLE[res as usize][1];
-    let mut temp3 = *TABLE[res as usize][2];
+    let mut temp1 = TABLE[res as usize][0];
+    let mut temp2 = TABLE[res as usize][1];
+    let mut temp3 = TABLE[res as usize][2];
     for i in (3..b).step_by(2) {
         let temp4 = (temp1 + temp2).normalize();
         let temp5 = (temp2 + temp3).normalize();
         let temp6 = (temp1 + temp3).normalize();
 
-        let a1 = (temp4 - temp6).cross(&(v - temp6));
+        let a1 = (temp4 - temp6).cross(v - temp6);
         if a1.dot(v) < 0.0 {
-            let a2 = (temp5 - temp4).cross(&(v - temp4));
+            let a2 = (temp5 - temp4).cross(v - temp4);
             if a2.dot(v) < 0.0 {
-                let a3 = (temp6 - temp5).cross(&(v - temp5));
+                let a3 = (temp6 - temp5).cross(v - temp5);
                 if a3.dot(v) < 0.0 {
                     res |= 3 << i;
                     temp1 = temp4;

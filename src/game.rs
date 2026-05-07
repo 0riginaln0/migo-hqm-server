@@ -1,8 +1,8 @@
 use crate::protocol;
-use nalgebra::{Matrix3, Point3, Rotation3, Unit, Vector2, Vector3, point};
 
 use crate::game::RinkSideOfLine::{BlueSide, On, RedSide};
 use crate::protocol::{PuckPacket, SkaterPacket};
+use glam::{Mat3, Vec2, Vec3};
 use std::f32::consts::PI;
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -83,7 +83,7 @@ pub struct RinkLine {
 }
 
 impl RinkLine {
-    pub fn side_of_line(&self, pos: &Point3<f32>, radius: f32) -> RinkSideOfLine {
+    pub fn side_of_line(&self, pos: Vec3, radius: f32) -> RinkSideOfLine {
         let dot = pos.z - self.z;
         if dot > (self.width / 2.0) + radius {
             RedSide
@@ -105,17 +105,17 @@ pub enum RinkSideOfLine {
 /// A rink net.
 #[derive(Debug, Clone)]
 pub(crate) struct RinkNet {
-    pub(crate) posts: Vec<(Point3<f32>, Point3<f32>, f32)>,
-    pub(crate) surfaces: Vec<(Point3<f32>, Point3<f32>, Point3<f32>, Point3<f32>)>,
-    pub(crate) left_post: Point3<f32>,
-    pub(crate) right_post: Point3<f32>,
-    pub(crate) normal: Vector3<f32>,
-    pub(crate) left_post_inside: Vector3<f32>,
-    pub(crate) right_post_inside: Vector3<f32>,
+    pub(crate) posts: Vec<(Vec3, Vec3, f32)>,
+    pub(crate) surfaces: Vec<(Vec3, Vec3, Vec3, Vec3)>,
+    pub(crate) left_post: Vec3,
+    pub(crate) right_post: Vec3,
+    pub(crate) normal: Vec3,
+    pub(crate) left_post_inside: Vec3,
+    pub(crate) right_post_inside: Vec3,
 }
 
 impl RinkNet {
-    fn new(pos: Point3<f32>, rot: Matrix3<f32>) -> Self {
+    fn new(pos: Vec3, rot: Mat3) -> Self {
         let front_width = 3.0;
         let back_width = 2.5;
         let front_half_width = front_width / 2.0;
@@ -134,14 +134,14 @@ impl RinkNet {
             back_lower_left,
             back_lower_right,
         ) = (
-            pos + rot * Vector3::new(-front_half_width, height, 0.0),
-            pos + rot * Vector3::new(front_half_width, height, 0.0),
-            pos + rot * Vector3::new(-front_half_width, 0.0, 0.0),
-            pos + rot * Vector3::new(front_half_width, 0.0, 0.0),
-            pos + rot * Vector3::new(-back_half_width, height, -upper_depth),
-            pos + rot * Vector3::new(back_half_width, height, -upper_depth),
-            pos + rot * Vector3::new(-back_half_width, 0.0, -lower_depth),
-            pos + rot * Vector3::new(back_half_width, 0.0, -lower_depth),
+            pos + rot * Vec3::new(-front_half_width, height, 0.0),
+            pos + rot * Vec3::new(front_half_width, height, 0.0),
+            pos + rot * Vec3::new(-front_half_width, 0.0, 0.0),
+            pos + rot * Vec3::new(front_half_width, 0.0, 0.0),
+            pos + rot * Vec3::new(-back_half_width, height, -upper_depth),
+            pos + rot * Vec3::new(back_half_width, height, -upper_depth),
+            pos + rot * Vec3::new(-back_half_width, 0.0, -lower_depth),
+            pos + rot * Vec3::new(back_half_width, 0.0, -lower_depth),
         );
 
         RinkNet {
@@ -186,9 +186,9 @@ impl RinkNet {
             ],
             left_post: front_lower_left,
             right_post: front_lower_right,
-            normal: rot * Vector3::z(),
-            left_post_inside: rot * Vector3::x(),
-            right_post_inside: rot * -Vector3::x(),
+            normal: rot * Vec3::Z,
+            left_post_inside: rot * Vec3::X,
+            right_post_inside: rot * Vec3::NEG_X,
         }
     }
 }
@@ -205,8 +205,8 @@ impl RinkNet {
 /// 0.0 at the left wall looking from the position of the red goalie, and goes up to 30.0 at the right wall.
 #[derive(Debug, Clone)]
 pub struct Rink {
-    pub(crate) planes: Vec<(Point3<f32>, Unit<Vector3<f32>>)>,
-    pub(crate) corners: Vec<(Point3<f32>, Vector3<f32>, f32)>,
+    pub(crate) planes: Vec<(Vec3, Vec3)>,
+    pub(crate) corners: Vec<(Vec3, Vec3, f32)>,
     pub(crate) red_net: RinkNet,
     pub(crate) blue_net: RinkNet,
     pub center_line: RinkLine,
@@ -218,36 +218,35 @@ pub struct Rink {
 
 impl Rink {
     pub(crate) fn new(width: f32, length: f32, corner_radius: f32) -> Self {
-        let zero = Point3::new(0.0, 0.0, 0.0);
         let planes = vec![
-            (zero, Vector3::y_axis()),
-            (Point3::new(0.0, 0.0, length), -Vector3::z_axis()),
-            (zero, Vector3::z_axis()),
-            (Point3::new(width, 0.0, 0.0), -Vector3::x_axis()),
-            (zero, Vector3::x_axis()),
+            (Vec3::ZERO, Vec3::Y),
+            (Vec3::new(0.0, 0.0, length), Vec3::NEG_Z),
+            (Vec3::ZERO, Vec3::Z),
+            (Vec3::new(width, 0.0, 0.0), Vec3::NEG_X),
+            (Vec3::ZERO, Vec3::X),
         ];
         let r = corner_radius;
         let wr = width - corner_radius;
         let lr = length - corner_radius;
         let corners = vec![
             (
-                Point3::new(r, 0.0, r),
-                Vector3::new(-1.0, 0.0, -1.0),
+                Vec3::new(r, 0.0, r),
+                Vec3::new(-1.0, 0.0, -1.0),
                 corner_radius,
             ),
             (
-                Point3::new(wr, 0.0, r),
-                Vector3::new(1.0, 0.0, -1.0),
+                Vec3::new(wr, 0.0, r),
+                Vec3::new(1.0, 0.0, -1.0),
                 corner_radius,
             ),
             (
-                Point3::new(wr, 0.0, lr),
-                Vector3::new(1.0, 0.0, 1.0),
+                Vec3::new(wr, 0.0, lr),
+                Vec3::new(1.0, 0.0, 1.0),
                 corner_radius,
             ),
             (
-                Point3::new(r, 0.0, lr),
-                Vector3::new(-1.0, 0.0, 1.0),
+                Vec3::new(r, 0.0, lr),
+                Vec3::new(-1.0, 0.0, 1.0),
                 corner_radius,
             ),
         ];
@@ -265,13 +264,10 @@ impl Rink {
         let center_z = length / 2.0;
         let blue_zone_blueline_z = blue_line_distance_mid;
 
-        let blue_net = RinkNet::new(
-            Point3::new(center_x, 0.0, goal_line_distance),
-            Matrix3::identity(),
-        );
+        let blue_net = RinkNet::new(Vec3::new(center_x, 0.0, goal_line_distance), Mat3::IDENTITY);
         let red_net = RinkNet::new(
-            Point3::new(center_x, 0.0, length - goal_line_distance),
-            Matrix3::from_columns(&[-Vector3::x(), Vector3::y(), -Vector3::z()]),
+            Vec3::new(center_x, 0.0, length - goal_line_distance),
+            Mat3::from_cols(Vec3::NEG_X, Vec3::Y, Vec3::NEG_Z),
         );
 
         let red_zone_blue_line = RinkLine {
@@ -304,11 +300,11 @@ impl Rink {
 /// Represents a physical body (both players and pucks) with a position, rotation and linear and angular velocities.
 #[derive(Debug, Clone)]
 pub struct PhysicsBody {
-    pub pos: Point3<f32>,               // Measured in meters
-    pub linear_velocity: Vector3<f32>,  // Measured in meters per hundred of a second
-    pub rot: Rotation3<f32>,            // Rotation matrix
-    pub angular_velocity: Vector3<f32>, // Measured in radians per hundred of a second
-    pub(crate) rot_mul: Vector3<f32>,
+    pub pos: Vec3,              // Measured in meters
+    pub linear_velocity: Vec3,  // Measured in meters per hundred of a second
+    pub rot: Mat3,              // Rotation matrix
+    pub angular_velocity: Vec3, // Measured in radians per hundred of a second
+    pub(crate) rot_mul: Vec3,
 }
 
 /// Represents a skater object.
@@ -320,44 +316,44 @@ pub struct PhysicsBody {
 pub struct SkaterObject {
     pub body: PhysicsBody,
     /// Stick position in absolute space, measured in meters.
-    pub stick_pos: Point3<f32>,
+    pub stick_pos: Vec3,
     /// Stick velocity, measured in meters per hundred of a second
-    pub stick_velocity: Vector3<f32>,
+    pub stick_velocity: Vec3,
     /// Stick rotation.
-    pub stick_rot: Rotation3<f32>, // Rotation matrix
+    pub stick_rot: Mat3, // Rotation matrix
     /// Left-right body rotation around the Y axis in radians. Left is negative and right is positive, and the normal range is -(7/8)π to (7/8)π.
     pub head_rot: f32, // Radians
     /// Forward-backward body rotation around the X axis in radians. Backwards is negative and forwards is positive, and the normal range is -π/2 to π/2.
     pub body_rot: f32, // Radians
     pub(crate) height: f32,
     pub(crate) jumped_last_frame: bool,
-    pub stick_placement: Vector2<f32>, // Azimuth and inclination in radians
-    pub stick_placement_delta: Vector2<f32>, // Change in azimuth and inclination per hundred of a second
+    pub stick_placement: Vec2,       // Azimuth and inclination in radians
+    pub stick_placement_delta: Vec2, // Change in azimuth and inclination per hundred of a second
     pub collision_balls: Vec<SkaterCollisionBall>,
     pub hand: SkaterHand,
 }
 
 impl SkaterObject {
-    pub fn new(pos: Point3<f32>, rot: Rotation3<f32>, hand: SkaterHand) -> Self {
-        let linear_velocity = Vector3::new(0.0, 0.0, 0.0);
+    pub fn new(pos: Vec3, rot: Mat3, hand: SkaterHand) -> Self {
+        let linear_velocity = Vec3::new(0.0, 0.0, 0.0);
         let collision_balls = SkaterObject::get_collision_balls(&pos, &rot, &linear_velocity, 1.0);
         SkaterObject {
             body: PhysicsBody {
                 pos,
                 linear_velocity,
                 rot,
-                angular_velocity: Vector3::new(0.0, 0.0, 0.0),
-                rot_mul: Vector3::new(2.75, 6.16, 2.35),
+                angular_velocity: Vec3::new(0.0, 0.0, 0.0),
+                rot_mul: Vec3::new(2.75, 6.16, 2.35),
             },
             stick_pos: pos,
-            stick_velocity: Vector3::new(0.0, 0.0, 0.0),
-            stick_rot: Rotation3::identity(),
+            stick_velocity: Vec3::new(0.0, 0.0, 0.0),
+            stick_rot: Mat3::IDENTITY,
             head_rot: 0.0,
             body_rot: 0.0,
             height: 0.75,
             jumped_last_frame: false,
-            stick_placement: Vector2::new(0.0, 0.0),
-            stick_placement_delta: Vector2::new(0.0, 0.0),
+            stick_placement: Vec2::new(0.0, 0.0),
+            stick_placement_delta: Vec2::new(0.0, 0.0),
             hand,
             collision_balls,
         }
@@ -372,14 +368,14 @@ impl SkaterObject {
         );
     }
     fn get_collision_balls(
-        pos: &Point3<f32>,
-        rot: &Rotation3<f32>,
-        linear_velocity: &Vector3<f32>,
+        pos: &Vec3,
+        rot: &Mat3,
+        linear_velocity: &Vec3,
         mass: f32,
     ) -> Vec<SkaterCollisionBall> {
         vec![
             SkaterCollisionBall::from_skater(
-                Vector3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 0.0),
                 pos,
                 rot,
                 linear_velocity,
@@ -387,7 +383,7 @@ impl SkaterObject {
                 mass,
             ),
             SkaterCollisionBall::from_skater(
-                Vector3::new(0.25, 0.3125, 0.0),
+                Vec3::new(0.25, 0.3125, 0.0),
                 pos,
                 rot,
                 linear_velocity,
@@ -395,7 +391,7 @@ impl SkaterObject {
                 mass,
             ),
             SkaterCollisionBall::from_skater(
-                Vector3::new(-0.25, 0.3125, 0.0),
+                Vec3::new(-0.25, 0.3125, 0.0),
                 pos,
                 rot,
                 linear_velocity,
@@ -403,7 +399,7 @@ impl SkaterObject {
                 mass,
             ),
             SkaterCollisionBall::from_skater(
-                Vector3::new(-0.1875, -0.1875, 0.0),
+                Vec3::new(-0.1875, -0.1875, 0.0),
                 pos,
                 rot,
                 linear_velocity,
@@ -411,7 +407,7 @@ impl SkaterObject {
                 mass,
             ),
             SkaterCollisionBall::from_skater(
-                Vector3::new(0.1875, -0.1875, 0.0),
+                Vec3::new(0.1875, -0.1875, 0.0),
                 pos,
                 rot,
                 linear_velocity,
@@ -419,7 +415,7 @@ impl SkaterObject {
                 mass,
             ),
             SkaterCollisionBall::from_skater(
-                Vector3::new(0.0, 0.5, 0.0),
+                Vec3::new(0.0, 0.5, 0.0),
                 pos,
                 rot,
                 linear_velocity,
@@ -430,8 +426,8 @@ impl SkaterObject {
     }
 
     pub(crate) fn get_packet(&self) -> SkaterPacket {
-        let rot = protocol::convert_matrix_to_network(31, self.body.rot.matrix());
-        let stick_rot = protocol::convert_matrix_to_network(25, self.stick_rot.matrix());
+        let rot = protocol::convert_matrix_to_network(31, &self.body.rot);
+        let stick_rot = protocol::convert_matrix_to_network(25, &self.stick_rot);
 
         SkaterPacket {
             pos: (
@@ -454,19 +450,19 @@ impl SkaterObject {
 
 #[derive(Debug, Clone)]
 pub struct SkaterCollisionBall {
-    pub offset: Vector3<f32>,
-    pub pos: Point3<f32>,
-    pub velocity: Vector3<f32>,
+    pub offset: Vec3,
+    pub pos: Vec3,
+    pub velocity: Vec3,
     pub radius: f32,
     pub mass: f32,
 }
 
 impl SkaterCollisionBall {
     fn from_skater(
-        offset: Vector3<f32>,
-        skater_pos: &Point3<f32>,
-        skater_rot: &Rotation3<f32>,
-        velocity: &Vector3<f32>,
+        offset: Vec3,
+        skater_pos: &Vec3,
+        skater_rot: &Mat3,
+        velocity: &Vec3,
         radius: f32,
         mass: f32,
     ) -> Self {
@@ -474,7 +470,7 @@ impl SkaterCollisionBall {
         SkaterCollisionBall {
             offset,
             pos,
-            velocity: velocity.clone_owned(),
+            velocity: velocity.clone(),
             radius,
             mass,
         }
@@ -496,7 +492,7 @@ pub struct PlayerInput {
     /// The position is a vector with a X axis and a Y axis value, both in radians.
     /// For the X axis, left is negative and right is positive, and the normal range is -π/2 to π/2.
     /// For the Y axis, down is negative and up is positive, and the normal range is -(5/16)π to π/8
-    pub stick: Vector2<f32>,
+    pub stick: Vec2,
 
     /// Left-right body rotation around the Y axis in radians. Left is negative and right is positive, and the normal range is -(7/8)π to (7/8)π.
     pub head_rot: f32,
@@ -515,7 +511,7 @@ impl Default for PlayerInput {
             stick_angle: 0.0,
             turn: 0.0,
             fwbw: 0.0,
-            stick: Vector2::new(0.0, 0.0),
+            stick: Vec2::ZERO,
             head_rot: 0.0,
             body_rot: 0.0,
             keys: 0,
@@ -559,14 +555,14 @@ pub struct Puck {
 }
 
 impl Puck {
-    pub fn new(pos: Point3<f32>, rot: Rotation3<f32>) -> Self {
+    pub fn new(pos: Vec3, rot: Mat3) -> Self {
         Puck {
             body: PhysicsBody {
                 pos,
-                linear_velocity: Vector3::new(0.0, 0.0, 0.0),
+                linear_velocity: Vec3::ZERO,
                 rot,
-                angular_velocity: Vector3::new(0.0, 0.0, 0.0),
-                rot_mul: Vector3::new(223.5, 128.0, 223.5),
+                angular_velocity: Vec3::ZERO,
+                rot_mul: Vec3::new(223.5, 128.0, 223.5),
             },
             radius: 0.125,
             height: 0.041_25,
@@ -574,7 +570,7 @@ impl Puck {
     }
 
     pub(crate) fn get_packet(&self) -> PuckPacket {
-        let rot = protocol::convert_matrix_to_network(31, self.body.rot.matrix());
+        let rot = protocol::convert_matrix_to_network(31, &self.body.rot);
         PuckPacket {
             pos: (
                 get_position(17, 1024.0 * self.body.pos.x),
@@ -585,12 +581,12 @@ impl Puck {
         }
     }
 
-    pub(crate) fn get_puck_vertices(&self) -> [Point3<f32>; 48] {
-        let mut res = [const { point![0.0, 0.0, 0.0] }; 48];
+    pub(crate) fn get_puck_vertices(&self) -> [Vec3; 48] {
+        let mut res = [Vec3::ZERO; 48];
         for i in 0..16 {
             let (sin, cos) = ((i as f32) * PI / 8.0).sin_cos();
             for j in -1..=1 {
-                let point = Vector3::new(
+                let point = Vec3::new(
                     cos * self.radius,
                     (j as f32) * self.height,
                     sin * self.radius,

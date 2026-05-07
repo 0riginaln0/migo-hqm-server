@@ -13,9 +13,9 @@ use async_stream::stream;
 use bytes::{BufMut, BytesMut};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use nalgebra::{Point3, Rotation3};
-use std::error::Error;
 
+use glam::{Mat3, Vec3};
+use std::error::Error;
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
@@ -423,8 +423,8 @@ impl HQMServerPlayersAndMessages {
         &mut self,
         player_index: PlayerId,
         team: Team,
-        pos: Point3<f32>,
-        rot: Rotation3<f32>,
+        pos: Vec3,
+        rot: Mat3,
         keep_stick_position: bool,
     ) -> bool {
         let empty_slot = self.find_empty_player_object_slot();
@@ -433,8 +433,10 @@ impl HQMServerPlayersAndMessages {
                 let mut new_skater = SkaterObject::new(pos, rot, player.preferred_hand);
                 if keep_stick_position {
                     let stick_pos_diff = skater.stick_pos - skater.body.pos;
-                    let rot_change = skater.body.rot.rotation_to(&rot);
-                    let stick_rot_diff = skater.body.rot.rotation_to(&skater.stick_rot);
+
+                    let skater_body_rot_inv = skater.body.rot.inverse();
+                    let rot_change = rot * skater_body_rot_inv;
+                    let stick_rot_diff = skater.stick_rot * skater_body_rot_inv;
 
                     new_skater.stick_pos = pos + (rot_change * stick_pos_diff);
                     new_skater.stick_rot = stick_rot_diff * rot;

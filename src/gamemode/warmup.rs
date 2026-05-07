@@ -2,7 +2,7 @@ use crate::game::Puck;
 use crate::game::{PhysicsEvent, PlayerId};
 use crate::gamemode::util::{SpawnPoint, add_players, get_spawnpoint};
 use crate::gamemode::{GameMode, InitialGameValues, PuckExt, ServerMut, ServerMutParts};
-use nalgebra::{Point3, Rotation3};
+use glam::{Mat3, Vec3};
 use std::collections::HashMap;
 
 pub struct PermanentWarmup {
@@ -70,8 +70,8 @@ impl GameMode for PermanentWarmup {
         let puck_line_start = width / 2.0 - 0.4 * ((warmup_pucks - 1) as f32);
 
         for i in 0..warmup_pucks {
-            let pos = Point3::new(puck_line_start + 0.8 * (i as f32), 1.5, length / 2.0);
-            let rot = Rotation3::identity();
+            let pos = Vec3::new(puck_line_start + 0.8 * (i as f32), 1.5, length / 2.0);
+            let rot = Mat3::IDENTITY;
             server.pucks_mut().spawn_puck(Puck::new(pos, rot));
         }
     }

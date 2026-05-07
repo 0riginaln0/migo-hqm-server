@@ -1,8 +1,7 @@
-use nalgebra::{Point3, Rotation3, Vector3};
+use glam::{Mat3, Vec3};
 use reborrow::ReborrowMut;
 use std::collections::HashMap;
 use std::f32::consts::PI;
-
 use tracing::info;
 
 use crate::game::{PhysicsEvent, PlayerId};
@@ -80,10 +79,10 @@ impl ShootoutGameMode {
         let length = server.rink().length;
         let width = server.rink().width;
 
-        let puck_pos = Point3::new(width / 2.0, 1.0, length / 2.0);
+        let puck_pos = Vec3::new(width / 2.0, 1.0, length / 2.0);
         server
             .pucks_mut()
-            .spawn_puck(Puck::new(puck_pos, Rotation3::identity()));
+            .spawn_puck(Puck::new(puck_pos, Mat3::IDENTITY));
 
         let mut red_players = vec![];
         let mut blue_players = vec![];
@@ -99,11 +98,12 @@ impl ShootoutGameMode {
             }
         }
 
-        let red_rot = Rotation3::identity();
-        let blue_rot = Rotation3::from_euler_angles(0.0, PI, 0.0);
+        let red_rot = Mat3::IDENTITY;
 
-        let red_goalie_pos = Point3::new(width / 2.0, 1.5, length - 5.0);
-        let blue_goalie_pos = Point3::new(width / 2.0, 1.5, 5.0);
+        let blue_rot = Mat3::from_rotation_y(PI);
+
+        let red_goalie_pos = Vec3::new(width / 2.0, 1.5, length - 5.0);
+        let blue_goalie_pos = Vec3::new(width / 2.0, 1.5, 5.0);
         let (attacking_players, defending_players, attacking_rot, defending_rot, goalie_pos) =
             match team {
                 Team::Red => (
@@ -115,13 +115,13 @@ impl ShootoutGameMode {
                 ),
                 Team::Blue => (blue_players, red_players, blue_rot, red_rot, red_goalie_pos),
             };
-        let center_pos = Point3::new(width / 2.0, 1.5, length / 2.0);
+        let center_pos = Vec3::new(width / 2.0, 1.5, length / 2.0);
         for (index, player_index) in attacking_players.into_iter().enumerate() {
-            let mut pos = center_pos + attacking_rot * Vector3::new(0.0, 0.0, 3.0);
+            let mut pos = center_pos + attacking_rot * Vec3::new(0.0, 0.0, 3.0);
             if index > 0 {
                 let dist = ((index / 2) + 1) as f32;
 
-                let side = Vector3::new(-1.5 * dist, 0.0, 0.0);
+                let side = Vec3::new(-1.5 * dist, 0.0, 0.0);
                 pos += attacking_rot * side;
             }
             server
@@ -133,7 +133,7 @@ impl ShootoutGameMode {
             if index > 0 {
                 let dist = ((index / 2) + 1) as f32;
 
-                let side = Vector3::new(-1.5 * dist, 0.0, 0.0);
+                let side = Vec3::new(-1.5 * dist, 0.0, 0.0);
                 pos += defending_rot * side;
             }
             server.players_mut().spawn_skater(
@@ -511,17 +511,17 @@ impl GameMode for ShootoutGameMode {
                             self.end_attempt(server, false);
                         } else if let Some(puck) = server.pucks().get_puck(0) {
                             let puck_pos = &puck.body.pos;
-                            let center_pos = Point3::new(
+                            let center_pos = Vec3::new(
                                 server.rink().width / 2.0,
                                 0.0,
                                 server.rink().length / 2.0,
                             );
                             let pos_diff = puck_pos - center_pos;
                             let normal = match *team {
-                                Team::Red => -Vector3::z(),
-                                Team::Blue => Vector3::z(),
+                                Team::Red => Vec3::NEG_Z,
+                                Team::Blue => Vec3::Z,
                             };
-                            let progress = pos_diff.dot(&normal);
+                            let progress = pos_diff.dot(normal);
                             if let ShootoutAttemptState::Attack {
                                 progress: current_progress,
                             } = state

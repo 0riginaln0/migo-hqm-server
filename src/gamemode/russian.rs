@@ -1,4 +1,3 @@
-use nalgebra::{Point3, Rotation3, Vector3};
 use std::collections::HashMap;
 use tracing::info;
 
@@ -9,6 +8,7 @@ use crate::gamemode::{
     ExitReason, GameMode, InitialGameValues, PuckExt, Server, ServerMut, ServerMutParts,
 };
 use crate::physics;
+use glam::{Mat3, Vec3};
 use reborrow::ReborrowMut;
 use std::f32::consts::FRAC_PI_2;
 
@@ -56,8 +56,8 @@ impl RussianGameMode {
                     Team::Red => mid_z + 12.0,
                     Team::Blue => mid_z - 12.0,
                 };
-                let pos = Point3::new(0.5, 2.0, z);
-                let rot = Rotation3::from_euler_angles(0.0, 3.0 * FRAC_PI_2, 0.0);
+                let pos = Vec3::new(0.5, 2.0, z);
+                let rot = Mat3::from_rotation_y(3.0 * FRAC_PI_2);
                 (pos, rot)
             },
             |_| {},
@@ -72,11 +72,11 @@ impl RussianGameMode {
             Team::Red => 55.0,
             Team::Blue => 6.0,
         };
-        let puck_pos = Point3::new(server.rink().width / 2.0, 0.5, z);
+        let puck_pos = Vec3::new(server.rink().width / 2.0, 0.5, z);
 
         server
             .pucks_mut()
-            .spawn_puck(Puck::new(puck_pos, Rotation3::identity()));
+            .spawn_puck(Puck::new(puck_pos, Mat3::IDENTITY));
 
         self.fix_status(server, team);
     }
@@ -147,18 +147,18 @@ impl RussianGameMode {
             }
         }
 
-        let rot = Rotation3::from_euler_angles(0.0, 3.0 * FRAC_PI_2, 0.0);
+        let rot = Mat3::from_rotation_y(3.0 * FRAC_PI_2);
         let length = server.rink().length;
         for (index, player_id) in red_players.into_iter().enumerate() {
             let z = (length / 2.0) + (12.0 + index as f32);
-            let pos = Point3::new(0.5, 2.0, z);
+            let pos = Vec3::new(0.5, 2.0, z);
             server
                 .players_mut()
                 .spawn_skater(player_id, Team::Red, pos, rot, false);
         }
         for (index, player_id) in blue_players.into_iter().enumerate() {
             let z = (length / 2.0) - (12.0 + index as f32);
-            let pos = Point3::new(0.5, 2.0, z);
+            let pos = Vec3::new(0.5, 2.0, z);
             server
                 .players_mut()
                 .spawn_skater(player_id, Team::Blue, pos, rot, false);
@@ -248,22 +248,22 @@ impl GameMode for RussianGameMode {
                     }
                     let (line, normal) = if team == Team::Red {
                         red_player_count += 1;
-                        (&rink.red_zone_blue_line, Vector3::z_axis())
+                        (&rink.red_zone_blue_line, Vec3::Z)
                     } else {
                         blue_player_count += 1;
-                        (&rink.blue_zone_blue_line, -Vector3::z_axis())
+                        (&rink.blue_zone_blue_line, Vec3::NEG_Z)
                     };
 
-                    let p = Point3::new(0.0, 0.0, line.z);
+                    let p = Vec3::new(0.0, 0.0, line.z);
                     for collision_ball in skater.collision_balls.iter_mut() {
                         let pos = &collision_ball.pos;
                         let radius = collision_ball.radius;
-                        let overlap = (p - pos).dot(&normal) + radius;
+                        let overlap = (p - pos).dot(normal) + radius;
                         if overlap > 0.0 {
-                            let mut new = normal.scale(overlap * 0.03125)
-                                - collision_ball.velocity.scale(0.25);
-                            if new.dot(&normal) > 0.0 {
-                                physics::limit_friction(&mut new, &normal, 0.01);
+                            let mut new =
+                                overlap * 0.03125 * normal - 0.25 * collision_ball.velocity;
+                            if new.dot(normal) > 0.0 {
+                                physics::limit_friction(&mut new, normal, 0.01);
 
                                 collision_ball.velocity += new;
                             }

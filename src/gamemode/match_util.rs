@@ -6,7 +6,7 @@ use crate::game::RinkSideOfLine::{BlueSide, RedSide};
 use crate::gamemode::{Server, ServerMut, ServerPlayer};
 
 use arraydeque::{ArrayDeque, Wrapping};
-use nalgebra::{Point3, Rotation3, Vector3};
+use glam::{Mat3, Vec3};
 use reborrow::{Reborrow, ReborrowMut};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -19,9 +19,9 @@ pub const ALLOWED_POSITIONS: [&str; 18] = [
 
 #[derive(Debug, Clone)]
 pub struct FaceoffSpot {
-    pub center_position: Point3<f32>,
-    pub red_player_positions: HashMap<&'static str, (Point3<f32>, Rotation3<f32>)>,
-    pub blue_player_positions: HashMap<&'static str, (Point3<f32>, Rotation3<f32>)>,
+    pub center_position: Vec3,
+    pub red_player_positions: HashMap<&'static str, (Vec3, Mat3)>,
+    pub blue_player_positions: HashMap<&'static str, (Vec3, Mat3)>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -161,11 +161,11 @@ impl Match {
         );
 
         let puck_pos =
-            next_faceoff_spot.center_position + (self.config.spawn_puck_altitude * Vector3::y());
+            next_faceoff_spot.center_position + (self.config.spawn_puck_altitude * Vec3::Y);
 
         server
             .pucks_mut()
-            .spawn_puck(Puck::new(puck_pos, Rotation3::identity()));
+            .spawn_puck(Puck::new(puck_pos, Mat3::IDENTITY));
 
         self.started_as_goalie.clear();
         for (player_index, (team, faceoff_position)) in positions {
@@ -187,9 +187,9 @@ impl Match {
 
         let rink = server.rink();
         self.icing_status = IcingStatus::No;
-        self.offside_status = if rink.blue_zone_blue_line.side_of_line(&puck_pos, 0.0) == BlueSide {
+        self.offside_status = if rink.blue_zone_blue_line.side_of_line(puck_pos, 0.0) == BlueSide {
             OffsideStatus::InOffensiveZone(Team::Red)
-        } else if rink.red_zone_blue_line.side_of_line(&puck_pos, 0.0) == RedSide {
+        } else if rink.red_zone_blue_line.side_of_line(puck_pos, 0.0) == RedSide {
             OffsideStatus::InOffensiveZone(Team::Blue)
         } else {
             OffsideStatus::Neutral
@@ -253,7 +253,7 @@ impl Match {
             let mut goal_scorer_first_touch = 0;
             let mut puck_speed_from_stick = None;
             let mut last_touch = None;
-            let puck_speed_across_line = this_puck.body.linear_velocity.norm();
+            let puck_speed_across_line = this_puck.body.linear_velocity.length();
             if let Some(touches) = self.puck_touches.get(&puck_index) {
                 last_touch = touches.front().map(|x| x.player_id);
 
@@ -913,12 +913,12 @@ impl Match {
         let puck_line_start = width / 2.0 - 0.4 * ((warmup_pucks - 1) as f32);
 
         for i in 0..warmup_pucks {
-            let pos = Point3::new(
+            let pos = Vec3::new(
                 puck_line_start + 0.8 * (i as f32),
                 self.config.spawn_puck_altitude,
                 length / 2.0,
             );
-            let rot = Rotation3::identity();
+            let rot = Mat3::IDENTITY;
             server.pucks_mut().spawn_puck(Puck::new(pos, rot));
         }
     }
@@ -997,7 +997,7 @@ enum TwoLinePassStatus {
 struct PuckTouch {
     pub player_id: PlayerId,
     pub team: Team,
-    pub puck_pos: Point3<f32>,
+    pub puck_pos: Vec3,
     pub puck_speed: f32,
     pub first_time: u32,
     pub last_time: u32,
@@ -1011,7 +1011,7 @@ fn add_touch(
     time: u32,
 ) {
     let puck_pos = puck.body.pos;
-    let puck_speed = puck.body.linear_velocity.norm();
+    let puck_speed = puck.body.linear_velocity.length();
 
     let touches = entry.or_default();
     let most_recent_touch = touches.front_mut();
@@ -1068,9 +1068,9 @@ fn get_faceoff_positions(
 fn is_past_line(player: ServerPlayer, team: Team, line: &RinkLine) -> bool {
     if let Some((skater_team, skater)) = player.skater() {
         if skater_team == team {
-            let feet_pos = skater.body.pos - (skater.body.rot * Vector3::y().scale(skater.height));
-            if (team == Team::Red && line.side_of_line(&feet_pos, 0.0) == BlueSide)
-                || (team == Team::Blue && line.side_of_line(&feet_pos, 0.0) == RedSide)
+            let feet_pos = skater.body.pos - (skater.body.rot * (skater.height * Vec3::Y));
+            if (team == Team::Red && line.side_of_line(feet_pos, 0.0) == BlueSide)
+                || (team == Team::Blue && line.side_of_line(feet_pos, 0.0) == RedSide)
             {
                 // Player is past line
                 return true;
@@ -1177,10 +1177,10 @@ fn get_faceoff_spot(
     let length = rink.length;
     let width = rink.width;
 
-    let red_rot = Rotation3::identity();
-    let blue_rot = Rotation3::from_euler_angles(0.0, PI, 0.0);
-    let red_goalie_pos = Point3::new(width / 2.0, spawn_player_altitude, length - 5.0);
-    let blue_goalie_pos = Point3::new(width / 2.0, spawn_player_altitude, 5.0);
+    let red_rot = Mat3::IDENTITY;
+    let blue_rot = Mat3::from_rotation_y(PI);
+    let red_goalie_pos = Vec3::new(width / 2.0, spawn_player_altitude, length - 5.0);
+    let blue_goalie_pos = Vec3::new(width / 2.0, spawn_player_altitude, 5.0);
 
     let goal_line_distance = 4.0; // IIHF rule 17iv
 
@@ -1199,7 +1199,7 @@ fn get_faceoff_spot(
     let blue_neutral_faceoff_z = distance_neutral_faceoff_spot;
     let blue_zone_faceoff_z = distance_zone_faceoff_spot;
 
-    let create_faceoff_spot = |center_position: Point3<f32>| {
+    let create_faceoff_spot = |center_position: Vec3| {
         let red_defensive_zone = center_position.z > length - 11.0;
         let blue_defensive_zone = center_position.z < 11.0;
         let (red_left, red_right) = if center_position.x < 9.0 {
@@ -1213,16 +1213,16 @@ fn get_faceoff_spot(
         let blue_right = red_left;
 
         fn get_positions(
-            center_position: &Point3<f32>,
-            rot: &Rotation3<f32>,
-            goalie_pos: &Point3<f32>,
+            center_position: Vec3,
+            rot: Mat3,
+            goalie_pos: Vec3,
             is_defensive_zone: bool,
             is_close_to_left: bool,
             is_close_to_right: bool,
 
             spawn_point_offset: f32,
             spawn_player_altitude: f32,
-        ) -> HashMap<&'static str, (Point3<f32>, Rotation3<f32>)> {
+        ) -> HashMap<&'static str, (Vec3, Mat3)> {
             let mut player_positions = HashMap::new();
 
             let winger_z = 4.0;
@@ -1242,17 +1242,17 @@ fn get_faceoff_spot(
             let offsets = vec![
                 (
                     "C",
-                    Vector3::new(0.0, spawn_player_altitude, spawn_point_offset),
+                    Vec3::new(0.0, spawn_player_altitude, spawn_point_offset),
                 ),
-                ("LM", Vector3::new(-2.0, spawn_player_altitude, m_z)),
-                ("RM", Vector3::new(2.0, spawn_player_altitude, m_z)),
-                ("LW", Vector3::new(-5.0, spawn_player_altitude, winger_z)),
-                ("RW", Vector3::new(5.0, spawn_player_altitude, winger_z)),
-                ("LD", Vector3::new(-2.0, spawn_player_altitude, d_z)),
-                ("RD", Vector3::new(2.0, spawn_player_altitude, d_z)),
+                ("LM", Vec3::new(-2.0, spawn_player_altitude, m_z)),
+                ("RM", Vec3::new(2.0, spawn_player_altitude, m_z)),
+                ("LW", Vec3::new(-5.0, spawn_player_altitude, winger_z)),
+                ("RW", Vec3::new(5.0, spawn_player_altitude, winger_z)),
+                ("LD", Vec3::new(-2.0, spawn_player_altitude, d_z)),
+                ("RD", Vec3::new(2.0, spawn_player_altitude, d_z)),
                 (
                     "LLM",
-                    Vector3::new(
+                    Vec3::new(
                         if is_close_to_left && is_defensive_zone {
                             -3.0
                         } else {
@@ -1264,7 +1264,7 @@ fn get_faceoff_spot(
                 ),
                 (
                     "RRM",
-                    Vector3::new(
+                    Vec3::new(
                         if is_close_to_right && is_defensive_zone {
                             3.0
                         } else {
@@ -1276,7 +1276,7 @@ fn get_faceoff_spot(
                 ),
                 (
                     "LLD",
-                    Vector3::new(
+                    Vec3::new(
                         if is_close_to_left && is_defensive_zone {
                             -3.0
                         } else {
@@ -1288,7 +1288,7 @@ fn get_faceoff_spot(
                 ),
                 (
                     "RRD",
-                    Vector3::new(
+                    Vec3::new(
                         if is_close_to_right && is_defensive_zone {
                             3.0
                         } else {
@@ -1298,17 +1298,17 @@ fn get_faceoff_spot(
                         d_z,
                     ),
                 ),
-                ("CM", Vector3::new(0.0, spawn_player_altitude, m_z)),
-                ("CD", Vector3::new(0.0, spawn_player_altitude, d_z)),
-                ("LW2", Vector3::new(-6.0, spawn_player_altitude, winger_z)),
-                ("RW2", Vector3::new(6.0, spawn_player_altitude, winger_z)),
+                ("CM", Vec3::new(0.0, spawn_player_altitude, m_z)),
+                ("CD", Vec3::new(0.0, spawn_player_altitude, d_z)),
+                ("LW2", Vec3::new(-6.0, spawn_player_altitude, winger_z)),
+                ("RW2", Vec3::new(6.0, spawn_player_altitude, winger_z)),
                 (
                     "LLW",
-                    Vector3::new(far_left_winger_x, spawn_player_altitude, far_left_winger_z),
+                    Vec3::new(far_left_winger_x, spawn_player_altitude, far_left_winger_z),
                 ),
                 (
                     "RRW",
-                    Vector3::new(
+                    Vec3::new(
                         far_right_winger_x,
                         spawn_player_altitude,
                         far_right_winger_z,
@@ -1318,18 +1318,18 @@ fn get_faceoff_spot(
             for (s, offset) in offsets {
                 let pos = center_position + rot * offset;
 
-                player_positions.insert(s, (pos, *rot));
+                player_positions.insert(s, (pos, rot));
             }
 
-            player_positions.insert("G", (*goalie_pos, *rot));
+            player_positions.insert("G", (goalie_pos, rot));
 
             player_positions
         }
 
         let red_player_positions = get_positions(
-            &center_position,
-            &red_rot,
-            &red_goalie_pos,
+            center_position,
+            red_rot,
+            red_goalie_pos,
             red_defensive_zone,
             red_left,
             red_right,
@@ -1337,9 +1337,9 @@ fn get_faceoff_spot(
             spawn_player_altitude,
         );
         let blue_player_positions = get_positions(
-            &center_position,
-            &blue_rot,
-            &blue_goalie_pos,
+            center_position,
+            blue_rot,
+            blue_goalie_pos,
             blue_defensive_zone,
             blue_left,
             blue_right,
@@ -1355,7 +1355,7 @@ fn get_faceoff_spot(
     };
 
     match spot {
-        RinkFaceoffSpot::Center => create_faceoff_spot(Point3::new(center_x, 0.0, center_z)),
+        RinkFaceoffSpot::Center => create_faceoff_spot(Vec3::new(center_x, 0.0, center_z)),
         RinkFaceoffSpot::DefensiveZone(team, side) => {
             let z = match team {
                 Team::Red => red_zone_faceoff_z,
@@ -1365,7 +1365,7 @@ fn get_faceoff_spot(
                 RinkSide::LowerHalfZ => left_faceoff_x,
                 RinkSide::HigherHalfZ => right_faceoff_x,
             };
-            create_faceoff_spot(Point3::new(x, 0.0, z))
+            create_faceoff_spot(Vec3::new(x, 0.0, z))
         }
         RinkFaceoffSpot::Offside(team, side) => {
             let z = match team {
@@ -1376,7 +1376,7 @@ fn get_faceoff_spot(
                 RinkSide::LowerHalfZ => left_faceoff_x,
                 RinkSide::HigherHalfZ => right_faceoff_x,
             };
-            create_faceoff_spot(Point3::new(x, 0.0, z))
+            create_faceoff_spot(Vec3::new(x, 0.0, z))
         }
     }
 }
