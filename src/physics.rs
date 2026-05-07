@@ -229,7 +229,7 @@ fn update_stick(
 
     let placement_diff = stick_input - player.stick_placement;
     let placement_change = 0.0625 * placement_diff - 0.5 * player.stick_placement_delta;
-    let placement_change = limit_vector_length2(placement_change, 0.008_888_889);
+    let placement_change = placement_change.clamp_length_max(0.008_888_889);
 
     player.stick_placement_delta += placement_change;
     player.stick_placement += &player.stick_placement_delta;
@@ -370,7 +370,7 @@ fn update_player(
             // Calculates the step needed to change from current velocity to max velocity in the desired direction in
             // a single frame. This would be way too fast, so we limit the step to a specified max acceleration
 
-            player.body.linear_velocity += limit_vector_length(new_acceleration, max_acceleration);
+            player.body.linear_velocity += new_acceleration.clamp_length_max(max_acceleration);
         }
         if input.jump() && !player.jumped_last_frame {
             let diff = if physics_config.limit_jump_speed {
@@ -400,10 +400,8 @@ fn update_player(
                 - player.body.linear_velocity;
         // Change required to change velocity to max speed in the desired direction in one frame
         // Still way too fast, so we limit the maximum allowed change in a single frame
-        player.body.linear_velocity += limit_vector_length(
-            velocity_adjustment,
-            physics_config.player_shift_acceleration,
-        );
+        player.body.linear_velocity +=
+            velocity_adjustment.clamp_length_max(physics_config.player_shift_acceleration);
         let turn_change =
             (-turn * physics_config.player_shift_turning) * (player.body.rot * Vec3::Y);
         player.body.angular_velocity += turn_change;
@@ -524,7 +522,7 @@ fn update_player(
                         .body
                         .angular_velocity
                         .project_onto(rotation1_direction);
-            let angular_change = limit_vector_length(angular_change, 0.000_347_222_23);
+            let angular_change = angular_change.clamp_length_max(0.000_347_222_23);
             player.body.angular_velocity += angular_change;
         }
     }
@@ -1066,28 +1064,10 @@ fn adjust_head_body_rot(rot: &mut f32, input_rot: f32) {
     }
 }
 
-fn limit_vector_length(v: Vec3, max_len: f32) -> Vec3 {
-    let norm = v.length();
-    let mut res = v;
-    if norm > max_len {
-        res *= max_len / norm;
-    }
-    res
-}
-
-fn limit_vector_length2(v: Vec2, max_len: f32) -> Vec2 {
-    let norm = v.length();
-    let mut res = v;
-    if norm > max_len {
-        res *= max_len / norm;
-    }
-    res
-}
-
 pub fn limit_friction(v: &mut Vec3, normal: Vec3, d: f32) {
-    let projection_length = v.dot(normal);
-    let projection = projection_length * normal;
-    let rejection = *v - projection;
+    let projection = v.project_onto_normalized(normal);
+
+    let rejection = v.reject_from_normalized(normal);
     let rejection_length = rejection.length();
     *v = projection;
 
