@@ -205,9 +205,7 @@ pub fn convert_matrix_from_network(b: u8, v1: u32, v2: u32) -> Mat3 {
 fn convert_rot_column_from_network(b: u8, v: u32) -> Vec3 {
     let start = v & 7;
 
-    let mut temp1 = TABLE[start as usize][0];
-    let mut temp2 = TABLE[start as usize][1];
-    let mut temp3 = TABLE[start as usize][2];
+    let [mut temp1, mut temp2, mut temp3] = TABLE[start as usize];
     let mut pos = 3;
     while pos < b {
         let step = (v >> pos) & 3;
@@ -241,48 +239,33 @@ fn convert_rot_column_from_network(b: u8, v: u32) -> Vec3 {
 }
 
 fn convert_rot_column_to_network(b: u8, v: Vec3) -> u32 {
-    let mut res = 0;
+    let oct = (v[0] < 0.0) as u32
+        | ((v[2] < 0.0) as u32) << 1
+        | ((v[1] < 0.0) as u32) << 2;
 
-    if v[0] < 0.0 {
-        res |= 1
-    }
-    if v[2] < 0.0 {
-        res |= 2
-    }
-    if v[1] < 0.0 {
-        res |= 4
-    }
-    let mut temp1 = TABLE[res as usize][0];
-    let mut temp2 = TABLE[res as usize][1];
-    let mut temp3 = TABLE[res as usize][2];
+    let [mut t1, mut t2, mut t3] = TABLE[oct as usize];
+    let mut res = oct;
+
     for i in (3..b).step_by(2) {
-        let temp4 = (temp1 + temp2).normalize();
-        let temp5 = (temp2 + temp3).normalize();
-        let temp6 = (temp1 + temp3).normalize();
+        let m4 = (t1 + t2).normalize();
+        let m5 = (t2 + t3).normalize();
+        let m6 = (t1 + t3).normalize();
 
-        let a1 = (temp4 - temp6).cross(v - temp6);
-        if a1.dot(v) < 0.0 {
-            let a2 = (temp5 - temp4).cross(v - temp4);
-            if a2.dot(v) < 0.0 {
-                let a3 = (temp6 - temp5).cross(v - temp5);
-                if a3.dot(v) < 0.0 {
+        if m6.cross(m4).dot(v) < 0.0 {
+            if m4.cross(m5).dot(v) < 0.0 {
+                if m5.cross(m6).dot(v) < 0.0 {
                     res |= 3 << i;
-                    temp1 = temp4;
-                    temp2 = temp5;
-                    temp3 = temp6;
+                    t1 = m4; t2 = m5; t3 = m6;
                 } else {
                     res |= 2 << i;
-                    temp1 = temp6;
-                    temp2 = temp5;
+                    t1 = m6; t2 = m5;
                 }
             } else {
                 res |= 1 << i;
-                temp1 = temp4;
-                temp3 = temp5;
+                t1 = m4; t3 = m5;
             }
         } else {
-            temp2 = temp4;
-            temp3 = temp6;
+            t2 = m4; t3 = m6;
         }
     }
     res
@@ -345,30 +328,21 @@ impl<'a> HQMMessageWriter<'a> {
     }
 
     pub fn write_bits(&mut self, n: u8, v: u32) {
-        let to_write = if n < 32 { !(u32::MAX << n) & v } else { v };
-        let mut bits_remaining = n;
-        let mut p = 0;
-        while bits_remaining > 0 {
-            let bits_possible_to_write = 8 - self.bit_pos;
-            let bits = min(bits_remaining, bits_possible_to_write);
-            let mask = !(u32::MAX << bits);
-            let a = ((to_write >> p) & mask) as u8;
+        debug_assert!(n <= 32);
+        let v = if n < 32 { v & !(u32::MAX << n) } else { v };
+        let staged: u64 = (v as u64) << self.bit_pos;
+        let total_bits = self.bit_pos + n;
+        let total_bytes = (total_bits + 7) / 8;
 
-            if self.bit_pos == 0 {
-                self.buf.put_u8(a);
-            } else {
-                *(self.buf.last_mut().unwrap()) |= a << self.bit_pos;
-            }
-
-            if bits_remaining >= bits_possible_to_write {
-                bits_remaining -= bits_possible_to_write;
-                self.bit_pos = 0;
-                p += bits;
-            } else {
-                self.bit_pos += bits;
-                bits_remaining = 0;
-            }
+        if self.bit_pos > 0 {
+            *self.buf.last_mut().unwrap() |= staged as u8;
         }
+        let start = if self.bit_pos > 0 { 1 } else { 0 };
+        for i in start..total_bytes as usize {
+            self.buf.put_u8((staged >> (i * 8)) as u8);
+        }
+
+        self.bit_pos = total_bits % 8;
     }
 
     pub fn recording_fix(&mut self) {
