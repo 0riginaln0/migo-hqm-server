@@ -8,7 +8,8 @@ use crate::gamemode::{
     ExitReason, GameMode, InitialGameValues, PuckExt, Server, ServerMut, ServerMutParts,
 };
 use crate::physics;
-use glam::{Mat3, Vec3};
+use glam::Vec3;
+use glamx::Rot3;
 use reborrow::ReborrowMut;
 use std::f32::consts::FRAC_PI_2;
 
@@ -57,7 +58,7 @@ impl RussianGameMode {
                     Team::Blue => mid_z - 12.0,
                 };
                 let pos = Vec3::new(0.5, 2.0, z);
-                let rot = Mat3::from_rotation_y(3.0 * FRAC_PI_2);
+                let rot = Rot3::from_rotation_y(3.0 * FRAC_PI_2);
                 (pos, rot)
             },
             |_| {},
@@ -76,7 +77,7 @@ impl RussianGameMode {
 
         server
             .pucks_mut()
-            .spawn_puck(Puck::new(puck_pos, Mat3::IDENTITY));
+            .spawn_puck(Puck::new(puck_pos, Rot3::IDENTITY));
 
         self.fix_status(server, team);
     }
@@ -147,7 +148,7 @@ impl RussianGameMode {
             }
         }
 
-        let rot = Mat3::from_rotation_y(3.0 * FRAC_PI_2);
+        let rot = Rot3::from_rotation_y(3.0 * FRAC_PI_2);
         let length = server.rink().length;
         for (index, player_id) in red_players.into_iter().enumerate() {
             let z = (length / 2.0) + (12.0 + index as f32);

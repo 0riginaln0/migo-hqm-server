@@ -14,7 +14,8 @@ use bytes::{BufMut, BytesMut};
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 
-use glam::{Mat3, Vec3};
+use glam::Vec3;
+use glamx::Rot3;
 use std::error::Error;
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
@@ -424,7 +425,7 @@ impl HQMServerPlayersAndMessages {
         player_index: PlayerId,
         team: Team,
         pos: Vec3,
-        rot: Mat3,
+        rot: Rot3,
         keep_stick_position: bool,
     ) -> bool {
         let empty_slot = self.find_empty_player_object_slot();

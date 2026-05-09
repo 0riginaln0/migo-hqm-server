@@ -7,7 +7,8 @@ use crate::server::{
     HQMServer, HQMServerPlayer, HQMServerPlayersAndMessages, HQMTickHistory, PlayerListExt,
     ServerPlayerData,
 };
-use glam::{Mat3, Vec3};
+use glam::Vec3;
+use glamx::Rot3;
 use reborrow::{Reborrow, ReborrowCopyTraits, ReborrowTraits};
 use std::borrow::Cow;
 use std::cmp::PartialEq;
@@ -317,7 +318,7 @@ impl<'a> ServerPlayersMut<'a> {
         player_index: PlayerId,
         team: Team,
         pos: Vec3,
-        rot: Mat3,
+        rot: Rot3,
         keep_stick_position: bool,
     ) -> bool {
         self.state

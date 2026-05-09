@@ -6,7 +6,8 @@ use crate::game::RinkSideOfLine::{BlueSide, RedSide};
 use crate::gamemode::{Server, ServerMut, ServerPlayer};
 
 use arraydeque::{ArrayDeque, Wrapping};
-use glam::{Mat3, Vec3};
+use glam::Vec3;
+use glamx::Rot3;
 use reborrow::{Reborrow, ReborrowMut};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -20,8 +21,8 @@ pub const ALLOWED_POSITIONS: [&str; 18] = [
 #[derive(Debug, Clone)]
 pub struct FaceoffSpot {
     pub center_position: Vec3,
-    pub red_player_positions: HashMap<&'static str, (Vec3, Mat3)>,
-    pub blue_player_positions: HashMap<&'static str, (Vec3, Mat3)>,
+    pub red_player_positions: HashMap<&'static str, (Vec3, Rot3)>,
+    pub blue_player_positions: HashMap<&'static str, (Vec3, Rot3)>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -165,7 +166,7 @@ impl Match {
 
         server
             .pucks_mut()
-            .spawn_puck(Puck::new(puck_pos, Mat3::IDENTITY));
+            .spawn_puck(Puck::new(puck_pos, Rot3::IDENTITY));
 
         self.started_as_goalie.clear();
         for (player_index, (team, faceoff_position)) in positions {
@@ -918,7 +919,7 @@ impl Match {
                 self.config.spawn_puck_altitude,
                 length / 2.0,
             );
-            let rot = Mat3::IDENTITY;
+            let rot = Rot3::IDENTITY;
             server.pucks_mut().spawn_puck(Puck::new(pos, rot));
         }
     }
@@ -1177,8 +1178,8 @@ fn get_faceoff_spot(
     let length = rink.length;
     let width = rink.width;
 
-    let red_rot = Mat3::IDENTITY;
-    let blue_rot = Mat3::from_rotation_y(PI);
+    let red_rot = Rot3::IDENTITY;
+    let blue_rot = Rot3::from_rotation_y(PI);
     let red_goalie_pos = Vec3::new(width / 2.0, spawn_player_altitude, length - 5.0);
     let blue_goalie_pos = Vec3::new(width / 2.0, spawn_player_altitude, 5.0);
 
@@ -1214,7 +1215,7 @@ fn get_faceoff_spot(
 
         fn get_positions(
             center_position: Vec3,
-            rot: Mat3,
+            rot: Rot3,
             goalie_pos: Vec3,
             is_defensive_zone: bool,
             is_close_to_left: bool,
@@ -1222,7 +1223,7 @@ fn get_faceoff_spot(
 
             spawn_point_offset: f32,
             spawn_player_altitude: f32,
-        ) -> HashMap<&'static str, (Vec3, Mat3)> {
+        ) -> HashMap<&'static str, (Vec3, Rot3)> {
             let mut player_positions = HashMap::new();
 
             let winger_z = 4.0;

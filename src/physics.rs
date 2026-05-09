@@ -6,7 +6,8 @@ use crate::game::{
 use crate::game::{PhysicsEvent, PlayerId};
 use crate::server::{HQMServer, PlayerListExt};
 use arrayvec::ArrayVec;
-use glam::{Mat3, Vec2, Vec3};
+use glam::{Vec2, Vec3};
+use glamx::Rot3;
 use smallvec::SmallVec;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_8, PI};
 use std::iter::FromIterator;
@@ -245,7 +246,7 @@ fn update_stick(
         let pivot1_pos =
             player.body.pos + (player.body.rot * Vec3::new(-0.375 * mul, -0.5, -0.125));
 
-        let stick_pos_converted = player.body.rot.transpose() * (player.stick_pos - pivot1_pos);
+        let stick_pos_converted = player.body.rot.inverse() * (player.stick_pos - pivot1_pos);
 
         let current_azimuth = stick_pos_converted[0].atan2(-stick_pos_converted[2]);
         let current_inclination = -stick_pos_converted[1]
@@ -1032,7 +1033,7 @@ fn apply_acceleration_to_object(body: &mut PhysicsBody, change: Vec3, point: Vec
     let diff1 = point - body.pos;
     body.linear_velocity += change;
     let cross = change.cross(diff1);
-    body.angular_velocity += body.rot * ((body.rot.transpose() * cross) * body.rot_mul);
+    body.angular_velocity += body.rot * ((body.rot.inverse() * cross) * body.inv_moment_of_inertia);
 }
 
 fn speed_of_point_including_rotation(
@@ -1044,7 +1045,7 @@ fn speed_of_point_including_rotation(
     linear_velocity + (p - pos).cross(angular_velocity)
 }
 
-fn rotate_matrix_spherical(matrix: &mut Mat3, azimuth: f32, inclination: f32) {
+fn rotate_matrix_spherical(matrix: &mut Rot3, azimuth: f32, inclination: f32) {
     let col1 = *matrix * Vec3::Y;
     rotate_matrix_around_axis(matrix, col1, azimuth);
     let col0 = *matrix * Vec3::X;
@@ -1080,11 +1081,11 @@ pub fn limit_friction(v: &mut Vec3, normal: Vec3, d: f32) {
 }
 
 fn rotate_vector_around_axis(v: &mut Vec3, axis: Vec3, angle: f32) {
-    let rot = Mat3::from_axis_angle(axis, -angle);
+    let rot = Rot3::from_axis_angle(axis, -angle);
     *v = rot * *v;
 }
 
-fn rotate_matrix_around_axis(v: &mut Mat3, axis: Vec3, angle: f32) {
-    let rot = Mat3::from_axis_angle(axis, -angle);
+fn rotate_matrix_around_axis(v: &mut Rot3, axis: Vec3, angle: f32) {
+    let rot = Rot3::from_axis_angle(axis, -angle);
     *v = rot * *v;
 }

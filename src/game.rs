@@ -2,7 +2,8 @@ use crate::protocol;
 
 use crate::game::RinkSideOfLine::{BlueSide, On, RedSide};
 use crate::protocol::{PuckPacket, SkaterPacket};
-use glam::{Mat3, Vec2, Vec3};
+use glam::{Vec2, Vec3};
+use glamx::Rot3;
 use std::f32::consts::PI;
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -115,7 +116,7 @@ pub(crate) struct RinkNet {
 }
 
 impl RinkNet {
-    fn new(pos: Vec3, rot: Mat3) -> Self {
+    fn new(pos: Vec3, rot: Rot3) -> Self {
         let front_width = 3.0;
         let back_width = 2.5;
         let front_half_width = front_width / 2.0;
@@ -264,10 +265,10 @@ impl Rink {
         let center_z = length / 2.0;
         let blue_zone_blueline_z = blue_line_distance_mid;
 
-        let blue_net = RinkNet::new(Vec3::new(center_x, 0.0, goal_line_distance), Mat3::IDENTITY);
+        let blue_net = RinkNet::new(Vec3::new(center_x, 0.0, goal_line_distance), Rot3::IDENTITY);
         let red_net = RinkNet::new(
             Vec3::new(center_x, 0.0, length - goal_line_distance),
-            Mat3::from_cols(Vec3::NEG_X, Vec3::Y, Vec3::NEG_Z),
+            Rot3::from_rotation_y(PI),
         );
 
         let red_zone_blue_line = RinkLine {
@@ -302,9 +303,9 @@ impl Rink {
 pub struct PhysicsBody {
     pub pos: Vec3,              // Measured in meters
     pub linear_velocity: Vec3,  // Measured in meters per hundred of a second
-    pub rot: Mat3,              // Rotation matrix
+    pub rot: Rot3,              // Rotation matrix
     pub angular_velocity: Vec3, // Measured in radians per hundred of a second
-    pub(crate) rot_mul: Vec3,
+    pub(crate) inv_moment_of_inertia: Vec3,
 }
 
 /// Represents a skater object.
@@ -320,7 +321,7 @@ pub struct SkaterObject {
     /// Stick velocity, measured in meters per hundred of a second
     pub stick_velocity: Vec3,
     /// Stick rotation.
-    pub stick_rot: Mat3, // Rotation matrix
+    pub stick_rot: Rot3, // Rotation matrix
     /// Left-right body rotation around the Y axis in radians. Left is negative and right is positive, and the normal range is -(7/8)π to (7/8)π.
     pub head_rot: f32, // Radians
     /// Forward-backward body rotation around the X axis in radians. Backwards is negative and forwards is positive, and the normal range is -π/2 to π/2.
@@ -334,7 +335,7 @@ pub struct SkaterObject {
 }
 
 impl SkaterObject {
-    pub fn new(pos: Vec3, rot: Mat3, hand: SkaterHand) -> Self {
+    pub fn new(pos: Vec3, rot: Rot3, hand: SkaterHand) -> Self {
         let linear_velocity = Vec3::new(0.0, 0.0, 0.0);
         let collision_balls = SkaterObject::get_collision_balls(&pos, &rot, &linear_velocity, 1.0);
         SkaterObject {
@@ -343,11 +344,11 @@ impl SkaterObject {
                 linear_velocity,
                 rot,
                 angular_velocity: Vec3::new(0.0, 0.0, 0.0),
-                rot_mul: Vec3::new(2.75, 6.16, 2.35),
+                inv_moment_of_inertia: Vec3::new(2.75, 6.16, 2.35),
             },
             stick_pos: pos,
             stick_velocity: Vec3::new(0.0, 0.0, 0.0),
-            stick_rot: Mat3::IDENTITY,
+            stick_rot: Rot3::IDENTITY,
             head_rot: 0.0,
             body_rot: 0.0,
             height: 0.75,
@@ -369,7 +370,7 @@ impl SkaterObject {
     }
     fn get_collision_balls(
         pos: &Vec3,
-        rot: &Mat3,
+        rot: &Rot3,
         linear_velocity: &Vec3,
         mass: f32,
     ) -> Vec<SkaterCollisionBall> {
@@ -461,7 +462,7 @@ impl SkaterCollisionBall {
     fn from_skater(
         offset: Vec3,
         skater_pos: &Vec3,
-        skater_rot: &Mat3,
+        skater_rot: &Rot3,
         velocity: &Vec3,
         radius: f32,
         mass: f32,
@@ -555,14 +556,14 @@ pub struct Puck {
 }
 
 impl Puck {
-    pub fn new(pos: Vec3, rot: Mat3) -> Self {
+    pub fn new(pos: Vec3, rot: Rot3) -> Self {
         Puck {
             body: PhysicsBody {
                 pos,
                 linear_velocity: Vec3::ZERO,
                 rot,
                 angular_velocity: Vec3::ZERO,
-                rot_mul: Vec3::new(223.5, 128.0, 223.5),
+                inv_moment_of_inertia: Vec3::new(223.5, 128.0, 223.5),
             },
             radius: 0.125,
             height: 0.041_25,

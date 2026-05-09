@@ -1,4 +1,5 @@
-use glam::{Mat3, Vec3};
+use glam::Vec3;
+use glamx::Rot3;
 use reborrow::ReborrowMut;
 use std::collections::HashMap;
 use std::f32::consts::PI;
@@ -82,7 +83,7 @@ impl ShootoutGameMode {
         let puck_pos = Vec3::new(width / 2.0, 1.0, length / 2.0);
         server
             .pucks_mut()
-            .spawn_puck(Puck::new(puck_pos, Mat3::IDENTITY));
+            .spawn_puck(Puck::new(puck_pos, Rot3::IDENTITY));
 
         let mut red_players = vec![];
         let mut blue_players = vec![];
@@ -98,9 +99,9 @@ impl ShootoutGameMode {
             }
         }
 
-        let red_rot = Mat3::IDENTITY;
+        let red_rot = Rot3::IDENTITY;
 
-        let blue_rot = Mat3::from_rotation_y(PI);
+        let blue_rot = Rot3::from_rotation_y(PI);
 
         let red_goalie_pos = Vec3::new(width / 2.0, 1.5, length - 5.0);
         let blue_goalie_pos = Vec3::new(width / 2.0, 1.5, 5.0);

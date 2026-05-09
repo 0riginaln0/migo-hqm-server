@@ -3,7 +3,8 @@ use crate::server::{HQMClientVersion, HQMMessage};
 use arraydeque::{ArrayDeque, Wrapping};
 use bytes::{BufMut, BytesMut};
 
-use glam::{Mat3, Vec2, Vec3};
+use glam::{Vec2, Vec3};
+use glamx::Rot3;
 use std::cmp::min;
 use std::io::Error;
 use std::string::FromUtf8Error;
@@ -187,18 +188,18 @@ fn get_player_name(bytes: &[u8]) -> Result<String, FromUtf8Error> {
     })
 }
 
-pub fn convert_matrix_to_network(b: u8, v: &Mat3) -> (u32, u32) {
-    let r1 = convert_rot_column_to_network(b, v.y_axis);
-    let r2 = convert_rot_column_to_network(b, v.z_axis);
+pub fn convert_matrix_to_network(b: u8, v: &Rot3) -> (u32, u32) {
+    let r1 = convert_rot_column_to_network(b, v * Vec3::Y);
+    let r2 = convert_rot_column_to_network(b, v * Vec3::Z);
     (r1, r2)
 }
 
 #[allow(dead_code)]
-pub fn convert_matrix_from_network(b: u8, v1: u32, v2: u32) -> Mat3 {
+pub fn convert_matrix_from_network(b: u8, v1: u32, v2: u32) -> Rot3 {
     let r1 = convert_rot_column_from_network(b, v1);
     let r2 = convert_rot_column_from_network(b, v2);
     let r0 = r1.cross(r2);
-    Mat3::from_cols(r0, r1, r2)
+    Rot3::from_rotation_axes(r0, r1, r2)
 }
 
 #[allow(dead_code)]
@@ -239,9 +240,7 @@ fn convert_rot_column_from_network(b: u8, v: u32) -> Vec3 {
 }
 
 fn convert_rot_column_to_network(b: u8, v: Vec3) -> u32 {
-    let oct = (v[0] < 0.0) as u32
-        | ((v[2] < 0.0) as u32) << 1
-        | ((v[1] < 0.0) as u32) << 2;
+    let oct = (v[0] < 0.0) as u32 | ((v[2] < 0.0) as u32) << 1 | ((v[1] < 0.0) as u32) << 2;
 
     let [mut t1, mut t2, mut t3] = TABLE[oct as usize];
     let mut res = oct;
@@ -255,17 +254,22 @@ fn convert_rot_column_to_network(b: u8, v: Vec3) -> u32 {
             if m4.cross(m5).dot(v) < 0.0 {
                 if m5.cross(m6).dot(v) < 0.0 {
                     res |= 3 << i;
-                    t1 = m4; t2 = m5; t3 = m6;
+                    t1 = m4;
+                    t2 = m5;
+                    t3 = m6;
                 } else {
                     res |= 2 << i;
-                    t1 = m6; t2 = m5;
+                    t1 = m6;
+                    t2 = m5;
                 }
             } else {
                 res |= 1 << i;
-                t1 = m4; t3 = m5;
+                t1 = m4;
+                t3 = m5;
             }
         } else {
-            t2 = m4; t3 = m6;
+            t2 = m4;
+            t3 = m6;
         }
     }
     res
