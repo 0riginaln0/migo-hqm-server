@@ -399,20 +399,24 @@ impl<'a> HQMMessageReader<'a> {
 
     pub fn read_u16_aligned(&mut self) -> u16 {
         self.align();
-        let b1: u16 = self.safe_get_byte(self.pos).into();
-        let b2: u16 = self.safe_get_byte(self.pos + 1).into();
+        let bytes = [
+            self.safe_get_byte(self.pos),
+            self.safe_get_byte(self.pos + 1),
+        ];
         self.pos += 2;
-        b1 | b2 << 8
+        u16::from_le_bytes(bytes)
     }
 
     pub fn read_u32_aligned(&mut self) -> u32 {
         self.align();
-        let b1: u32 = self.safe_get_byte(self.pos).into();
-        let b2: u32 = self.safe_get_byte(self.pos + 1).into();
-        let b3: u32 = self.safe_get_byte(self.pos + 2).into();
-        let b4: u32 = self.safe_get_byte(self.pos + 3).into();
+        let bytes = [
+            self.safe_get_byte(self.pos),
+            self.safe_get_byte(self.pos + 1),
+            self.safe_get_byte(self.pos + 2),
+            self.safe_get_byte(self.pos + 3),
+        ];
         self.pos += 4;
-        b1 | b2 << 8 | b3 << 16 | b4 << 24
+        u32::from_le_bytes(bytes)
     }
 
     pub fn read_f32_aligned(&mut self) -> f32 {
@@ -456,31 +460,27 @@ impl<'a> HQMMessageReader<'a> {
     }
 
     pub fn read_bits(&mut self, b: u8) -> u32 {
-        let mut res = 0u32;
-        let mut p = 0;
-        while p < b {
-            let byte = self.safe_get_byte(self.pos) >> self.bit_pos;
+        debug_assert!(b <= 32);
 
-            let bits_remaining = b - p;
-            let bits_possible_to_write = 8 - self.bit_pos;
-            let bits = min(bits_remaining, bits_possible_to_write);
+        let total_bytes = ((self.bit_pos + b + 7) / 8) as usize;
 
-            let mask = if bits == 8 {
-                u8::MAX
-            } else {
-                !(u8::MAX << bits)
-            };
-            let a = byte & mask;
-            let a: u32 = a.into();
-            res |= a << p;
-
-            self.bit_pos += bits;
-            if self.bit_pos == 8 {
-                self.bit_pos = 0;
-                self.pos += 1;
-            }
-            p += bits;
+        let mut staged = 0u64;
+        for i in 0..total_bytes {
+            let byte = self.buf.get(self.pos + i).copied().unwrap_or(0);
+            staged |= (byte as u64) << (i * 8);
         }
+
+        staged >>= self.bit_pos;
+        let res = if b < 32 {
+            (staged as u32) & !(u32::MAX << b)
+        } else {
+            staged as u32
+        };
+
+        self.bit_pos += b;
+        self.pos += (self.bit_pos / 8) as usize;
+        self.bit_pos %= 8;
+
         res
     }
 

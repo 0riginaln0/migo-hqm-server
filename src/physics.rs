@@ -1067,16 +1067,11 @@ fn adjust_head_body_rot(rot: &mut f32, input_rot: f32) {
 
 pub fn limit_friction(v: &mut Vec3, normal: Vec3, d: f32) {
     let projection = v.project_onto_normalized(normal);
-
     let rejection = v.reject_from_normalized(normal);
-    let rejection_length = rejection.length();
     *v = projection;
 
-    if rejection_length > 1.0 / 65536.0 {
-        let rejection_norm = rejection.normalize();
-
-        let rejection_length2 = rejection_length.min(projection.length() * d);
-        *v += rejection_length2 * rejection_norm;
+    if rejection.length() > 1.0 / 65536.0 {
+        *v += rejection.clamp_length_max(projection.length() * d);
     }
 }
 
