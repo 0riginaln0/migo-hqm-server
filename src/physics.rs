@@ -508,11 +508,7 @@ fn update_player(
             let axis = player.body.rot * Vec3::Z;
             let fraction_of_max_speed =
                 player.body.linear_velocity.dot(axis) / physics_config.max_player_speed;
-            rotate_vector_around_axis(
-                &mut intended_up,
-                axis,
-                -0.225 * turn * fraction_of_max_speed,
-            );
+            intended_up = intended_up.rotate_axis(axis, 0.225 * turn * fraction_of_max_speed);
         }
 
         let rotation1 = intended_up.cross(player.body.rot * Vec3::Y); // Vector that is perpendicular to the main Y and the current player Y
@@ -1073,11 +1069,6 @@ pub fn limit_friction(v: &mut Vec3, normal: Vec3, d: f32) {
     if rejection.length() > 1.0 / 65536.0 {
         *v += rejection.clamp_length_max(projection.length() * d);
     }
-}
-
-fn rotate_vector_around_axis(v: &mut Vec3, axis: Vec3, angle: f32) {
-    let rot = Rot3::from_axis_angle(axis, -angle);
-    *v = rot * *v;
 }
 
 fn rotate_matrix_around_axis(v: &mut Rot3, axis: Vec3, angle: f32) {
