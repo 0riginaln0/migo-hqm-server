@@ -287,8 +287,8 @@ fn update_stick(
             player.stick_placement[1],
         );
 
-        let temp = stick_rotation2 * Vec3::X;
-        rotate_matrix_around_axis(&mut stick_rotation2, temp, FRAC_PI_4);
+        let stick_rotation_x_axis = stick_rotation2 * Vec3::X;
+        rotate_matrix_around_axis(&mut stick_rotation2, stick_rotation_x_axis, FRAC_PI_4);
 
         let stick_length = 1.75;
 
@@ -475,8 +475,8 @@ fn update_player(
         // Makes players bounce up if their feet get below the ice
         let unit_y = Vec3::Y;
 
-        let temp2 = 0.25 * ((-feet_pos[1] * 0.125 * 0.125) * unit_y - player.body.linear_velocity);
-        if temp2.dot(unit_y) > 0.0 {
+        let ice_spring_force = 0.25 * ((-feet_pos[1] * 0.125 * 0.125) * unit_y - player.body.linear_velocity);
+        if ice_spring_force.dot(unit_y) > 0.0 {
             let (axis, rejection_limit) = if input.shift() {
                 (Vec3::X, 0.4) // Shift means you move sideways
             } else {
@@ -485,7 +485,7 @@ fn update_player(
             let direction = player.body.rot * axis;
             let direction = Vec3::new(direction.x, 0.0, direction.z).normalize();
 
-            let mut acceleration = temp2.reject_from(direction);
+            let mut acceleration = ice_spring_force.reject_from(direction);
             // We get the rejection here, so the acceleration will be a vector perpendicular to and
             // pointing away from direction
 
