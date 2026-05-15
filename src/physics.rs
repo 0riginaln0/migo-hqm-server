@@ -111,11 +111,7 @@ impl HQMServer {
                 puck.body.linear_velocity -= scaled;
             }
             if puck.body.angular_velocity.length() > 1.0 / 65536.0 {
-                rotate_matrix_around_axis(
-                    &mut puck.body.rot,
-                    puck.body.angular_velocity.normalize(),
-                    puck.body.angular_velocity.length(),
-                )
+                puck.body.rot = Rot3::from_scaled_axis(-puck.body.angular_velocity) * puck.body.rot;
             }
 
             puck_detection(puck, *puck_index, *old_puck_pos, &self.rink, &mut events);
@@ -261,20 +257,17 @@ fn update_stick(
 
         if player.stick_placement[1] > 0.0 {
             let axis = new_stick_rotation * Vec3::Y;
-            rotate_matrix_around_axis(
-                &mut new_stick_rotation,
-                axis,
-                player.stick_placement[1] * mul * FRAC_PI_2,
-            )
+            new_stick_rotation =
+                Rot3::from_axis_angle(axis, -player.stick_placement[1] * mul * FRAC_PI_2)
+                    * new_stick_rotation;
         }
 
         // Rotate around the stick axis
         let handle_axis = new_stick_rotation * Vec3::new(0.0, 0.75, 1.0).normalize();
-        rotate_matrix_around_axis(
-            &mut new_stick_rotation,
+        new_stick_rotation = Rot3::from_axis_angle(
             handle_axis,
-            (-replace_nan(input.stick_angle, 0.0)).clamp(-1.0, 1.0) * FRAC_PI_4,
-        );
+            replace_nan(input.stick_angle, 0.0).clamp(-1.0, 1.0) * FRAC_PI_4,
+        ) * new_stick_rotation;
 
         new_stick_rotation
     };
@@ -288,7 +281,8 @@ fn update_stick(
         );
 
         let stick_rotation_x_axis = stick_rotation2 * Vec3::X;
-        rotate_matrix_around_axis(&mut stick_rotation2, stick_rotation_x_axis, FRAC_PI_4);
+        stick_rotation2 =
+            Rot3::from_axis_angle(stick_rotation_x_axis, -FRAC_PI_4) * stick_rotation2;
 
         let stick_length = 1.75;
 
@@ -413,11 +407,7 @@ fn update_player(
     }
 
     if player.body.angular_velocity.length() > 1.0 / 65536.0 {
-        rotate_matrix_around_axis(
-            &mut player.body.rot,
-            player.body.angular_velocity.normalize(),
-            player.body.angular_velocity.length(),
-        );
+        player.body.rot = Rot3::from_scaled_axis(-player.body.angular_velocity) * player.body.rot;
     }
     adjust_head_body_rot(
         &mut player.head_rot,
@@ -430,10 +420,7 @@ fn update_player(
     for (collision_ball_index, collision_ball) in player.collision_balls.iter_mut().enumerate() {
         let mut new_rot = player.body.rot;
         if collision_ball_index == 1 || collision_ball_index == 2 || collision_ball_index == 5 {
-            let rot_axis = new_rot * Vec3::Y;
-            rotate_matrix_around_axis(&mut new_rot, rot_axis, player.head_rot * 0.5);
-            let rot_axis = new_rot * Vec3::X;
-            rotate_matrix_around_axis(&mut new_rot, rot_axis, player.body_rot);
+            rotate_matrix_spherical(&mut new_rot, player.head_rot * 0.5, player.body_rot);
         }
         let intended_collision_ball_pos = player.body.pos + (new_rot * collision_ball.offset);
         // With head and body rotations and offset, calculate where each ball is "supposed to be"
@@ -475,7 +462,8 @@ fn update_player(
         // Makes players bounce up if their feet get below the ice
         let unit_y = Vec3::Y;
 
-        let ice_spring_force = 0.25 * ((-feet_pos[1] * 0.125 * 0.125) * unit_y - player.body.linear_velocity);
+        let ice_spring_force =
+            0.25 * ((-feet_pos[1] * 0.125 * 0.125) * unit_y - player.body.linear_velocity);
         if ice_spring_force.dot(unit_y) > 0.0 {
             let (axis, rejection_limit) = if input.shift() {
                 (Vec3::X, 0.4) // Shift means you move sideways
@@ -1042,10 +1030,8 @@ fn speed_of_point_including_rotation(
 }
 
 fn rotate_matrix_spherical(matrix: &mut Rot3, azimuth: f32, inclination: f32) {
-    let col1 = *matrix * Vec3::Y;
-    rotate_matrix_around_axis(matrix, col1, azimuth);
-    let col0 = *matrix * Vec3::X;
-    rotate_matrix_around_axis(matrix, col0, inclination);
+    *matrix = Rot3::from_axis_angle(*matrix * Vec3::Y, -azimuth) * *matrix;
+    *matrix = Rot3::from_axis_angle(*matrix * Vec3::X, -inclination) * *matrix;
 }
 
 fn adjust_head_body_rot(rot: &mut f32, input_rot: f32) {
@@ -1069,9 +1055,4 @@ pub fn limit_friction(v: &mut Vec3, normal: Vec3, d: f32) {
     if rejection.length() > 1.0 / 65536.0 {
         *v += rejection.clamp_length_max(projection.length() * d);
     }
-}
-
-fn rotate_matrix_around_axis(v: &mut Rot3, axis: Vec3, angle: f32) {
-    let rot = Rot3::from_axis_angle(axis, -angle);
-    *v = rot * *v;
 }
