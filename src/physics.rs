@@ -111,7 +111,7 @@ impl HQMServer {
                 puck.body.linear_velocity -= scaled;
             }
             if puck.body.angular_velocity.length() > 1.0 / 65536.0 {
-                puck.body.rot = Rot3::from_scaled_axis(-puck.body.angular_velocity) * puck.body.rot;
+                puck.body.rot = Rot3::from_scaled_axis(puck.body.angular_velocity) * puck.body.rot;
             }
 
             puck_detection(puck, *puck_index, *old_puck_pos, &self.rink, &mut events);
@@ -398,16 +398,16 @@ fn update_player(
         player.body.linear_velocity +=
             velocity_adjustment.clamp_length_max(physics_config.player_shift_acceleration);
         let turn_change =
-            (-turn * physics_config.player_shift_turning) * (player.body.rot * Vec3::Y);
+            (turn * physics_config.player_shift_turning) * (player.body.rot * Vec3::Y);
         player.body.angular_velocity += turn_change;
     } else {
         // Regular turn, so let's just turn the player around its Y axis
-        let turn_change = (turn * physics_config.player_turning) * (player.body.rot * Vec3::Y);
+        let turn_change = (-turn * physics_config.player_turning) * (player.body.rot * Vec3::Y);
         player.body.angular_velocity += turn_change;
     }
 
     if player.body.angular_velocity.length() > 1.0 / 65536.0 {
-        player.body.rot = Rot3::from_scaled_axis(-player.body.angular_velocity) * player.body.rot;
+        player.body.rot = Rot3::from_scaled_axis(player.body.angular_velocity) * player.body.rot;
     }
     adjust_head_body_rot(
         &mut player.head_rot,
@@ -499,7 +499,7 @@ fn update_player(
             intended_up = intended_up.rotate_axis(axis, 0.225 * turn * fraction_of_max_speed);
         }
 
-        let rotation1 = intended_up.cross(player.body.rot * Vec3::Y); // Vector that is perpendicular to the main Y and the current player Y
+        let rotation1 = (player.body.rot * Vec3::Y).cross(intended_up);
         if let Some(rotation1_direction) = rotation1.try_normalize() {
             let angular_change = 0.008333333 * rotation1
                 - 0.25
@@ -1014,10 +1014,10 @@ fn collision_between_vertex_and_rink(vertex: Vec3, rink: &Rink) -> Option<(f32, 
 }
 
 fn apply_acceleration_to_object(body: &mut PhysicsBody, change: Vec3, point: Vec3) {
-    let diff1 = point - body.pos;
     body.linear_velocity += change;
-    let cross = change.cross(diff1);
-    body.angular_velocity += body.rot * ((body.rot.inverse() * cross) * body.inv_moment_of_inertia);
+    let lever = point - body.pos;
+    let torque = lever.cross(change);
+    body.angular_velocity += body.rot * ((body.rot.inverse() * torque) * body.inv_moment_of_inertia);
 }
 
 fn speed_of_point_including_rotation(
@@ -1026,7 +1026,7 @@ fn speed_of_point_including_rotation(
     linear_velocity: Vec3,
     angular_velocity: Vec3,
 ) -> Vec3 {
-    linear_velocity + (p - pos).cross(angular_velocity)
+    linear_velocity + angular_velocity.cross(p - pos)
 }
 
 fn rotate_matrix_spherical(matrix: &mut Rot3, azimuth: f32, inclination: f32) {
