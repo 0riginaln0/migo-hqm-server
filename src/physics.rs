@@ -6,7 +6,7 @@ use crate::game::{
 use crate::game::{PhysicsEvent, PlayerId};
 use crate::server::{HQMServer, PlayerListExt};
 use arrayvec::ArrayVec;
-use glam::{Vec2, Vec3};
+use glam::{EulerRot, Vec2, Vec3};
 use glamx::Rot3;
 use smallvec::SmallVec;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_8, PI};
@@ -239,72 +239,48 @@ fn update_stick(
         SkaterHand::Left => -1.0,
     };
     player.stick_rot = {
-        let pivot1_pos =
-            player.body.pos + (player.body.rot * Vec3::new(-0.375 * mul, -0.5, -0.125));
+        let stick_pos_local = player.body.rot.inverse() * (player.stick_pos - player.body.pos)
+            - Vec3::new(-0.375 * mul, -0.5, -0.125);
 
-        let stick_pos_converted = player.body.rot.inverse() * (player.stick_pos - pivot1_pos);
+        let current_azimuth = stick_pos_local[0].atan2(-stick_pos_local[2]);
+        let current_inclination = -stick_pos_local[1]
+            .atan2((stick_pos_local[0].powi(2) + stick_pos_local[2].powi(2)).sqrt());
+        let stick_angle = replace_nan(input.stick_angle, 0.0).clamp(-1.0, 1.0) * FRAC_PI_4;
 
-        let current_azimuth = stick_pos_converted[0].atan2(-stick_pos_converted[2]);
-        let current_inclination = -stick_pos_converted[1]
-            .atan2((stick_pos_converted[0].powi(2) + stick_pos_converted[2].powi(2)).sqrt());
-
-        let mut new_stick_rotation = player.body.rot;
-        rotate_matrix_spherical(
-            &mut new_stick_rotation,
-            current_azimuth,
-            current_inclination,
-        );
-
-        if player.stick_placement[1] > 0.0 {
-            let axis = new_stick_rotation * Vec3::Y;
-            new_stick_rotation =
-                Rot3::from_axis_angle(axis, -player.stick_placement[1] * mul * FRAC_PI_2)
-                    * new_stick_rotation;
-        }
-
-        // Rotate around the stick axis
-        let handle_axis = new_stick_rotation * Vec3::new(0.0, 0.75, 1.0).normalize();
-        new_stick_rotation = Rot3::from_axis_angle(
-            handle_axis,
-            replace_nan(input.stick_angle, 0.0).clamp(-1.0, 1.0) * FRAC_PI_4,
-        ) * new_stick_rotation;
-
-        new_stick_rotation
+        player.body.rot
+            * Rot3::from_euler(
+                EulerRot::YXY,
+                -current_azimuth,
+                -current_inclination,
+                -player.stick_placement[1].max(0.0) * mul * FRAC_PI_2,
+            )
+            * Rot3::from_axis_angle(Vec3::new(0.0, 0.6, 0.8), stick_angle)
     };
 
-    let (stick_force, intended_stick_position) = {
-        let mut stick_rotation2 = player.body.rot;
-        rotate_matrix_spherical(
-            &mut stick_rotation2,
-            player.stick_placement[0],
-            player.stick_placement[1],
+    let intended_stick_rotation = player.body.rot
+        * Rot3::from_euler(
+            EulerRot::YXZ,
+            -player.stick_placement[0],
+            -(player.stick_placement[1] + FRAC_PI_4),
+            0.0,
         );
 
-        let stick_rotation_x_axis = stick_rotation2 * Vec3::X;
-        stick_rotation2 =
-            Rot3::from_axis_angle(stick_rotation_x_axis, -FRAC_PI_4) * stick_rotation2;
+    let stick_grip_position =
+        player.body.pos + (player.body.rot * Vec3::new(-0.375 * mul, 0.5, -0.125));
+    let mut intended_stick_position =
+        stick_grip_position + intended_stick_rotation * (1.75 * Vec3::NEG_Z);
+    if intended_stick_position[1] < 0.0 {
+        intended_stick_position[1] = 0.0;
+    }
 
-        let stick_length = 1.75;
-
-        let stick_top_position =
-            player.body.pos + (player.body.rot * Vec3::new(-0.375 * mul, 0.5, -0.125));
-        let mut intended_stick_position =
-            stick_top_position + (stick_rotation2 * (stick_length * Vec3::NEG_Z));
-        if intended_stick_position[1] < 0.0 {
-            intended_stick_position[1] = 0.0;
-        }
-
-        let speed_at_stick_pos = speed_of_point_including_rotation(
-            intended_stick_position,
-            player.body.pos,
-            linear_velocity_before,
-            angular_velocity_before,
-        );
-        let stick_force = 0.125 * (intended_stick_position - player.stick_pos)
-            + 0.5 * (speed_at_stick_pos - player.stick_velocity);
-
-        (stick_force, intended_stick_position)
-    };
+    let speed_at_stick_pos = speed_of_point_including_rotation(
+        intended_stick_position,
+        player.body.pos,
+        linear_velocity_before,
+        angular_velocity_before,
+    );
+    let stick_force = 0.125 * (intended_stick_position - player.stick_pos)
+        + 0.5 * (speed_at_stick_pos - player.stick_velocity);
 
     player.stick_velocity += 0.996 * stick_force;
     apply_acceleration_to_object(
@@ -420,7 +396,8 @@ fn update_player(
     for (collision_ball_index, collision_ball) in player.collision_balls.iter_mut().enumerate() {
         let mut new_rot = player.body.rot;
         if collision_ball_index == 1 || collision_ball_index == 2 || collision_ball_index == 5 {
-            rotate_matrix_spherical(&mut new_rot, player.head_rot * 0.5, player.body_rot);
+            new_rot *=
+                Rot3::from_euler(EulerRot::YXZ, -player.head_rot * 0.5, -player.body_rot, 0.0);
         }
         let intended_collision_ball_pos = player.body.pos + (new_rot * collision_ball.offset);
         // With head and body rotations and offset, calculate where each ball is "supposed to be"
@@ -1017,7 +994,8 @@ fn apply_acceleration_to_object(body: &mut PhysicsBody, change: Vec3, point: Vec
     body.linear_velocity += change;
     let lever = point - body.pos;
     let torque = lever.cross(change);
-    body.angular_velocity += body.rot * ((body.rot.inverse() * torque) * body.inv_moment_of_inertia);
+    body.angular_velocity +=
+        body.rot * ((body.rot.inverse() * torque) * body.inv_moment_of_inertia);
 }
 
 fn speed_of_point_including_rotation(
@@ -1027,11 +1005,6 @@ fn speed_of_point_including_rotation(
     angular_velocity: Vec3,
 ) -> Vec3 {
     linear_velocity + angular_velocity.cross(p - pos)
-}
-
-fn rotate_matrix_spherical(matrix: &mut Rot3, azimuth: f32, inclination: f32) {
-    *matrix = Rot3::from_axis_angle(*matrix * Vec3::Y, -azimuth) * *matrix;
-    *matrix = Rot3::from_axis_angle(*matrix * Vec3::X, -inclination) * *matrix;
 }
 
 fn adjust_head_body_rot(rot: &mut f32, input_rot: f32) {
