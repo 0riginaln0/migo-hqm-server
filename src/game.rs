@@ -308,6 +308,16 @@ pub struct PhysicsBody {
     pub(crate) inv_moment_of_inertia: Vec3,
 }
 
+impl PhysicsBody {
+    pub fn apply_acceleration_to_object(&mut self, change: Vec3, point: Vec3) {
+        self.linear_velocity += change;
+        let lever = point - self.pos;
+        let torque = lever.cross(change);
+        self.angular_velocity +=
+            self.rot * ((self.rot.inverse() * torque) * self.inv_moment_of_inertia);
+    }
+}
+
 /// Represents a skater object.
 ///
 /// If you set the position, rotation, and/or linear velocity directly without adjusting the collision balls,

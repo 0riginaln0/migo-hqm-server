@@ -1,6 +1,6 @@
 use crate::game::RinkSideOfLine::{BlueSide, RedSide};
 use crate::game::{
-    PhysicsBody, PhysicsConfiguration, PlayerInput, Puck, Rink, RinkNet, SkaterCollisionBall,
+    PhysicsConfiguration, PlayerInput, Puck, Rink, RinkNet, SkaterCollisionBall,
     SkaterHand, SkaterObject, Team,
 };
 use crate::game::{PhysicsEvent, PlayerId};
@@ -283,8 +283,7 @@ fn update_stick(
         + 0.5 * (speed_at_stick_pos - player.stick_velocity);
 
     player.stick_velocity += 0.996 * stick_force;
-    apply_acceleration_to_object(
-        &mut player.body,
+    player.body.apply_acceleration_to_object(
         -0.004 * stick_force,
         intended_stick_position,
     );
@@ -411,8 +410,7 @@ fn update_player(
         );
         let force = 0.125 * collision_pos_diff + 0.25 * (speed - collision_ball.velocity);
         collision_ball.velocity += 0.9375 * force;
-        apply_acceleration_to_object(
-            &mut player.body,
+        player.body.apply_acceleration_to_object(
             (0.9375 - 1.0) * force,
             intended_collision_ball_pos,
         );
@@ -718,7 +716,7 @@ fn do_puck_net_forces(
 
         if normal.dot(puck_force) > 0.0 {
             limit_friction(&mut puck_force, normal, 0.5);
-            apply_acceleration_to_object(&mut puck.body, puck_force, overlap_pos);
+            puck.body.apply_acceleration_to_object(puck_force, overlap_pos);
             puck.body.linear_velocity *= 0.9875;
             puck.body.angular_velocity *= 0.95;
         }
@@ -748,7 +746,7 @@ fn do_puck_post_forces(
 
             if normal.dot(puck_force) > 0.0 {
                 limit_friction(&mut puck_force, normal, 0.2);
-                apply_acceleration_to_object(&mut puck.body, puck_force, p);
+                puck.body.apply_acceleration_to_object(puck_force, p);
             }
         }
     }
@@ -783,7 +781,7 @@ fn do_puck_stick_forces(
                 limit_friction(&mut puck_force, normal, 0.5);
                 player.stick_velocity -= 0.25 * puck_force;
                 puck_force *= 0.75;
-                apply_acceleration_to_object(&mut puck.body, puck_force, puck_vertex);
+                puck.body.apply_acceleration_to_object(puck_force, puck_vertex);
             }
         }
     }
@@ -811,7 +809,7 @@ fn do_puck_rink_forces(
 
             if normal.dot(puck_force) > 0.0 {
                 limit_friction(&mut puck_force, normal, friction);
-                apply_acceleration_to_object(&mut puck.body, puck_force, vertex);
+                puck.body.apply_acceleration_to_object(puck_force, vertex);
             }
         }
     }
@@ -988,14 +986,6 @@ fn collision_between_collision_ball_and_rink(
 
 fn collision_between_vertex_and_rink(vertex: Vec3, rink: &Rink) -> Option<(f32, Vec3)> {
     collision_between_sphere_and_rink(vertex, 0.0, rink)
-}
-
-fn apply_acceleration_to_object(body: &mut PhysicsBody, change: Vec3, point: Vec3) {
-    body.linear_velocity += change;
-    let lever = point - body.pos;
-    let torque = lever.cross(change);
-    body.angular_velocity +=
-        body.rot * ((body.rot.inverse() * torque) * body.inv_moment_of_inertia);
 }
 
 fn speed_of_point_including_rotation(
