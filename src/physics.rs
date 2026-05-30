@@ -845,7 +845,7 @@ fn get_stick_surfaces(player: &SkaterObject) -> StickSurfaces {
     ]
 }
 
-fn inside_surface(pos: Vec3, surface: &(Vec3, Vec3, Vec3, Vec3), normal: Vec3) -> bool {
+fn inside_surface(pos: Vec3, surface: &StickSurface, normal: Vec3) -> bool {
     let (p1, p2, p3, p4) = surface;
     (pos - p1).cross(p2 - p1).dot(normal) >= 0.0
         && (pos - p2).cross(p3 - p2).dot(normal) >= 0.0
