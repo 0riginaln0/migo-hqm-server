@@ -346,25 +346,25 @@ pub struct SkaterObject {
 
 impl SkaterObject {
     pub fn new(pos: Vec3, rot: Rot3, hand: SkaterHand) -> Self {
-        let linear_velocity = Vec3::new(0.0, 0.0, 0.0);
+        let linear_velocity = Vec3::ZERO;
         let collision_balls = SkaterObject::get_collision_balls(&pos, &rot, &linear_velocity, 1.0);
         SkaterObject {
             body: PhysicsBody {
                 pos,
                 linear_velocity,
                 rot,
-                angular_velocity: Vec3::new(0.0, 0.0, 0.0),
+                angular_velocity: Vec3::ZERO,
                 inv_moment_of_inertia: Vec3::new(2.75, 6.16, 2.35),
             },
             stick_pos: pos,
-            stick_velocity: Vec3::new(0.0, 0.0, 0.0),
+            stick_velocity: Vec3::ZERO,
             stick_rot: Rot3::IDENTITY,
             head_rot: 0.0,
             body_rot: 0.0,
             height: 0.75,
             jumped_last_frame: false,
-            stick_placement: Vec2::new(0.0, 0.0),
-            stick_placement_delta: Vec2::new(0.0, 0.0),
+            stick_placement: Vec2::ZERO,
+            stick_placement_delta: Vec2::ZERO,
             hand,
             collision_balls,
         }
