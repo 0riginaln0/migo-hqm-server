@@ -433,13 +433,10 @@ impl HQMServerPlayersAndMessages {
             if let Some((_, skater, team2)) = &mut player.object {
                 let mut new_skater = SkaterObject::new(pos, rot, player.preferred_hand);
                 if keep_stick_position {
-                    let body_rot_inv = skater.body.rot.inverse();
                     let stick_pos_diff = skater.stick_pos - skater.body.pos;
-                    let rot_change = body_rot_inv * rot;
-                    let stick_rot_diff = body_rot_inv * skater.stick_rot;
-
-                    new_skater.stick_pos = pos + (rot_change * stick_pos_diff);
-                    new_skater.stick_rot = stick_rot_diff * rot;
+                    let frame_change = rot * skater.body.rot.inverse();
+                    new_skater.stick_pos = pos + frame_change * stick_pos_diff;
+                    new_skater.stick_rot = frame_change * skater.stick_rot;
                     new_skater.stick_placement = skater.stick_placement;
                 }
                 *skater = new_skater;
