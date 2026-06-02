@@ -121,8 +121,6 @@ impl HQMServer {
     }
 }
 
-type StickSurface = (Vec3, Vec3, Vec3, Vec3);
-type StickSurfaces = [(Vec3, Vec3, Vec3, Vec3); 6];
 
 fn update_sticks_and_pucks(
     players: &mut [(PlayerId, &mut SkaterObject, &mut PlayerInput)],
@@ -135,10 +133,6 @@ fn update_sticks_and_pucks(
         for (_, player, _) in players.iter_mut() {
             player.stick_pos += 0.1 * player.stick_velocity;
         }
-        let stick_surfaces: ArrayVec<_, 32> = players
-            .iter()
-            .map(|(_, player, _)| get_stick_surfaces(player))
-            .collect();
 
         for (puck_index, puck, _) in pucks.iter_mut() {
             puck.body.pos += 0.1 * puck.body.linear_velocity;
@@ -156,15 +150,13 @@ fn update_sticks_and_pucks(
                     physics_config.puck_rink_friction,
                 );
             }
-            for (i, (player_index, player, _)) in players.iter_mut().enumerate() {
+            for (player_index, player, _) in players.iter_mut() {
                 let old_stick_velocity = player.stick_velocity;
-                let stick_surfaces = &stick_surfaces[i];
                 if (puck.body.pos - player.stick_pos).length() < 1.0 {
                     let has_touched = do_puck_stick_forces(
                         puck,
                         player,
                         &puck_vertices,
-                        stick_surfaces,
                         puck_linear_velocity_before,
                         puck_angular_velocity_before,
                         old_stick_velocity,
@@ -765,7 +757,6 @@ fn do_puck_stick_forces(
     puck: &mut Puck,
     player: &mut SkaterObject,
     puck_vertices: &[Vec3],
-    stick_surfaces: &StickSurfaces,
     puck_linear_velocity: Vec3,
     puck_angular_velocity: Vec3,
     stick_velocity: Vec3,
@@ -773,7 +764,7 @@ fn do_puck_stick_forces(
     let mut res = false;
     for puck_vertex in puck_vertices.iter().copied() {
         let col =
-            collision_between_puck_vertex_and_stick(puck.body.pos, puck_vertex, stick_surfaces);
+            collision_between_puck_vertex_and_stick(puck.body.pos, puck_vertex, player.stick_pos, player.stick_rot);
         if let Some((dot, normal)) = col {
             res = true;
             let puck_vertex_speed = speed_of_point_including_rotation(
@@ -824,28 +815,7 @@ fn do_puck_rink_forces(
     }
 }
 
-fn get_stick_surfaces(player: &SkaterObject) -> StickSurfaces {
-    let stick_size = Vec3::new(0.0625, 0.25, 0.5);
-    let nnn = player.stick_pos + player.stick_rot * (Vec3::new(-0.5, -0.5, -0.5) * stick_size);
-    let nnp = player.stick_pos + player.stick_rot * (Vec3::new(-0.5, -0.5, 0.5) * stick_size);
-    let npn = player.stick_pos + player.stick_rot * (Vec3::new(-0.5, 0.5, -0.5) * stick_size);
-    let npp = player.stick_pos + player.stick_rot * (Vec3::new(-0.5, 0.5, 0.5) * stick_size);
-    let pnn = player.stick_pos + player.stick_rot * (Vec3::new(0.5, -0.5, -0.5) * stick_size);
-    let pnp = player.stick_pos + player.stick_rot * (Vec3::new(0.5, -0.5, 0.5) * stick_size);
-    let ppn = player.stick_pos + player.stick_rot * (Vec3::new(0.5, 0.5, -0.5) * stick_size);
-    let ppp = player.stick_pos + player.stick_rot * (Vec3::new(0.5, 0.5, 0.5) * stick_size);
-
-    [
-        (nnp, pnp, pnn, nnn),
-        (npp, ppp, pnp, nnp),
-        (npn, npp, nnp, nnn),
-        (ppn, npn, nnn, pnn),
-        (ppp, ppn, pnn, pnp),
-        (npn, ppn, ppp, npp),
-    ]
-}
-
-fn inside_surface(pos: Vec3, surface: &StickSurface, normal: Vec3) -> bool {
+fn inside_surface(pos: Vec3, surface: &(Vec3, Vec3, Vec3, Vec3), normal: Vec3) -> bool {
     let (p1, p2, p3, p4) = surface;
     (pos - p1).cross(p2 - p1).dot(normal) >= 0.0
         && (pos - p2).cross(p3 - p2).dot(normal) >= 0.0
@@ -913,49 +883,60 @@ fn collision_between_sphere_and_post(
     }
 }
 
-fn collision_between_puck_and_surface(
-    puck_pos: Vec3,
-    puck_pos2: Vec3,
-    surface: &(Vec3, Vec3, Vec3, Vec3),
-) -> Option<(f32, Vec3, f32, Vec3)> {
-    let normal = (surface.3 - surface.0)
-        .cross(surface.1 - surface.0)
-        .normalize();
-    let p1 = &surface.0;
-    let puck_pos2_projection = (p1 - puck_pos2).dot(normal);
-    if puck_pos2_projection >= 0.0 {
-        let puck_pos_projection = (p1 - puck_pos).dot(normal);
-        if puck_pos_projection <= 0.0 {
-            let diff = puck_pos2 - puck_pos;
-            let diff_projection = diff.dot(normal);
-            if diff_projection != 0.0 {
-                let intersection = puck_pos_projection / diff_projection;
-                let intersection_pos = puck_pos + intersection * diff;
-
-                let overlap = (intersection_pos - puck_pos2).dot(normal);
-
-                if inside_surface(intersection_pos, surface, normal) {
-                    return Some((intersection, intersection_pos, overlap, normal));
-                }
-            }
-        }
-    }
-    None
-}
-
 fn collision_between_puck_vertex_and_stick(
     puck_pos: Vec3,
     puck_vertex: Vec3,
-    stick_surfaces: &[StickSurface],
+    stick_pos: Vec3,
+    stick_rot: Rot3,
 ) -> Option<(f32, Vec3)> {
+    let half_size = Vec3::new(0.03125, 0.125, 0.25); // stick_size * 0.5
+
+    let rot_inv = stick_rot.inverse();
+
+    // Transform both points into stick local space
+    let local_origin = rot_inv * (puck_pos - stick_pos);
+    let local_vertex = rot_inv * (puck_vertex - stick_pos);
+
+    let diff = local_vertex - local_origin;
+
+    // For each face of the AABB, test if the segment origin->vertex crosses it
+    // and find the earliest crossing that's inside the box
     let mut min_intersection = 1f32;
     let mut res = None;
-    for stick_surface in stick_surfaces.iter() {
-        let collision = collision_between_puck_and_surface(puck_pos, puck_vertex, stick_surface);
-        if let Some((intersection, _intersection_pos, overlap, normal)) = collision {
-            if intersection < min_intersection {
-                res = Some((overlap, normal));
-                min_intersection = intersection;
+
+    for axis in 0..3 {
+        for sign in [1f32, -1f32] {
+            let face_d = sign * half_size[axis];
+            let origin_side = local_origin[axis] - face_d;
+            let vertex_side = local_vertex[axis] - face_d;
+
+            // vertex must be on or past the face, origin must be inside or on other side
+            if vertex_side * sign <= 0.0 && origin_side * sign >= 0.0 {
+                let diff_axis = diff[axis];
+                if diff_axis != 0.0 {
+                    let intersection = -origin_side / diff_axis;
+                    if intersection < min_intersection {
+                        let intersection_pos = local_origin + intersection * diff;
+                        // Check inside the face bounds (the other two axes)
+                        let a = (axis + 1) % 3;
+                        let b = (axis + 2) % 3;
+                        if intersection_pos[a].abs() <= half_size[a]
+                            && intersection_pos[b].abs() <= half_size[b]
+                        {
+                            let overlap = (intersection_pos[axis] - local_vertex[axis]) * sign;
+                            // Normal in local space is just the axis unit vector
+                            let local_normal = sign * Vec3::from({
+                                let mut a = [0f32; 3];
+                                a[axis] = 1.0;
+                                a
+                            });
+                            // Transform normal back to world space
+                            let world_normal = stick_rot * local_normal;
+                            min_intersection = intersection;
+                            res = Some((overlap, world_normal));
+                        }
+                    }
+                }
             }
         }
     }
