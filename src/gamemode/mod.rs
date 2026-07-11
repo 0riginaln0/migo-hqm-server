@@ -250,32 +250,13 @@ pub struct ServerState<'a> {
 impl<'a> ServerState<'a> {
     /// Returns the position of a player's skater, if the player is currently on the ice.
     pub fn skater_position(&self, player_id: PlayerId) -> Option<Vec3> {
-        let player = self
-            .state
-            .player_message_state
-            .players
-            .get_player(player_id)?;
-        let (object_index, _) = player.object?;
-        match self.state.objects.get(object_index)? {
-            Some(GameObject::Skater(_, skater)) => Some(skater.body.pos),
-            _ => None,
-        }
+        Some(self.state.skater_for_player(player_id)?.body.pos)
     }
 
     /// Returns the position of the bottom of a player's skater, if on ice.
     pub fn skater_feet_position(&self, player_id: PlayerId) -> Option<Vec3> {
-        let player = self
-            .state
-            .player_message_state
-            .players
-            .get_player(player_id)?;
-        let (object_index, _) = player.object?;
-        match self.state.objects.get(object_index)? {
-            Some(GameObject::Skater(_, skater)) => {
-                Some(skater.body.pos - skater.body.rot * Vec3::Y * skater.height)
-            }
-            _ => None,
-        }
+        let skater = self.state.skater_for_player(player_id)?;
+        Some(skater.body.pos - skater.body.rot * Vec3::Y * skater.height)
     }
 
     /// Gets an immutable reference to player state.
@@ -311,7 +292,7 @@ pub struct ServerStateMutParts<'a> {
 #[derive(ReborrowTraits)]
 #[Const(ServerObjects)]
 pub struct ServerObjectsMut<'a> {
-    pub objects: &'a mut [Option<GameObject>],
+    objects: &'a mut [Option<GameObject>],
 }
 
 impl<'a> ServerObjectsMut<'a> {
@@ -344,7 +325,7 @@ impl<'a> ServerObjectsMut<'a> {
 
 #[derive(ReborrowCopyTraits)]
 pub struct ServerObjects<'a> {
-    pub objects: &'a [Option<GameObject>],
+    objects: &'a [Option<GameObject>],
 }
 
 impl<'a> ServerObjects<'a> {

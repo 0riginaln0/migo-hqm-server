@@ -1,5 +1,5 @@
 use crate::game::{PlayerId, PlayerIndex, PlayerInput, SkaterHand, Team};
-use crate::server::HQMClientVersion;
+use crate::server::{HQMClientVersion, ObjectSlot};
 use arraydeque::ArrayDeque;
 use arraydeque::behavior::Wrapping;
 use std::borrow::Cow;
@@ -10,7 +10,7 @@ use tracing::info;
 #[derive(Debug, Clone)]
 pub(crate) struct PlayerUpdateData {
     pub player_name: Rc<str>,
-    pub object: Option<(usize, Team)>,
+    pub object: Option<(ObjectSlot, Team)>,
 }
 
 #[derive(Debug, Clone)]
@@ -429,7 +429,7 @@ pub struct ServerPlayer {
     pub player_name: Rc<str>,
     player_name_red: Rc<str>,
     player_name_blue: Rc<str>,
-    pub object: Option<(usize, Team)>,
+    object: Option<(ObjectSlot, Team)>,
     pub data: ServerPlayerData,
     pub is_admin: bool,
     pub is_muted: MuteStatus,
@@ -504,7 +504,7 @@ impl ServerPlayer {
                 object: self
                     .object
                     .as_ref()
-                    .map(|(object_index, team)| (*object_index, *team)),
+                    .map(|(object_slot, team)| (*object_slot, *team)),
             }),
         }
     }
@@ -581,6 +581,24 @@ impl ServerPlayer {
 
     pub fn has_skater(&self) -> bool {
         self.object.is_some()
+    }
+
+    pub(crate) fn skater_assignment(&self) -> Option<(ObjectSlot, Team)> {
+        self.object
+    }
+
+    pub(crate) fn set_skater_assignment(&mut self, object_slot: ObjectSlot, team: Team) {
+        self.object = Some((object_slot, team));
+    }
+
+    pub(crate) fn clear_skater_assignment(&mut self) {
+        self.object = None;
+    }
+
+    pub(crate) fn set_skater_team(&mut self, team: Team) {
+        if let Some((_, current_team)) = &mut self.object {
+            *current_team = team;
+        }
     }
 }
 

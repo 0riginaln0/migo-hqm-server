@@ -44,6 +44,15 @@ const UPDATE_PACKET_TYPE: u8 = 5;
 const NEW_GAME_PACKET_TYPE: u8 = 6;
 const MAX_MESSAGES_PER_UPDATE: usize = 15;
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectSlot(usize);
+
+impl ObjectSlot {
+    pub(crate) fn index(self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum HQMClientVersion {
     Vanilla,
@@ -77,7 +86,7 @@ pub enum GameObject {
 
 pub(crate) trait ObjectExt {
     fn spawn_puck(&mut self, puck: Puck) -> Option<usize>;
-    fn spawn_skater(&mut self, player_id: PlayerId, skater: SkaterObject) -> Option<usize>;
+    fn spawn_skater(&mut self, player_id: PlayerId, skater: SkaterObject) -> Option<ObjectSlot>;
 }
 
 impl ObjectExt for [Option<GameObject>] {
@@ -90,10 +99,10 @@ impl ObjectExt for [Option<GameObject>] {
         }
     }
 
-    fn spawn_skater(&mut self, player_id: PlayerId, skater: SkaterObject) -> Option<usize> {
+    fn spawn_skater(&mut self, player_id: PlayerId, skater: SkaterObject) -> Option<ObjectSlot> {
         if let Some(object_index) = self.iter().position(|x| x.is_none()) {
             self[object_index] = Some(GameObject::Skater(player_id, skater));
-            Some(object_index)
+            Some(ObjectSlot(object_index))
         } else {
             None
         }
@@ -239,28 +248,95 @@ impl HQMServerState {
         self.objects = vec![None; 32];
     }
 
+    pub(crate) fn skater_for_player(&self, player_id: PlayerId) -> Option<&SkaterObject> {
+        let object_slot = self
+            .player_message_state
+            .players
+            .get_player(player_id)?
+            .skater_assignment()?
+            .0;
+        match self.objects.get(object_slot.index())? {
+            Some(GameObject::Skater(object_player_id, skater))
+                if *object_player_id == player_id =>
+            {
+                Some(skater)
+            }
+            _ => None,
+        }
+    }
+
+    fn skater_for_player_mut(&mut self, player_id: PlayerId) -> Option<&mut SkaterObject> {
+        let object_slot = self
+            .player_message_state
+            .players
+            .get_player(player_id)?
+            .skater_assignment()?
+            .0;
+        match self.objects.get_mut(object_slot.index())? {
+            Some(GameObject::Skater(object_player_id, skater))
+                if *object_player_id == player_id =>
+            {
+                Some(skater)
+            }
+            _ => None,
+        }
+    }
+
+    fn clear_skater_assignment(&mut self, player_id: PlayerId) -> bool {
+        let object_slot = match self
+            .player_message_state
+            .players
+            .get_player(player_id)
+            .and_then(|player| player.skater_assignment())
+        {
+            Some((object_slot, _)) => object_slot,
+            None => return false,
+        };
+
+        let Some(GameObject::Skater(object_player_id, _)) = self
+            .objects
+            .get(object_slot.index())
+            .and_then(Option::as_ref)
+        else {
+            return false;
+        };
+        if *object_player_id != player_id {
+            return false;
+        }
+
+        self.objects[object_slot.index()] = None;
+        if let Some(player) = self.player_message_state.players.get_player_mut(player_id) {
+            player.clear_skater_assignment();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn broadcast_player_update(&mut self, player_id: PlayerId) {
+        if let Some(player) = self.player_message_state.players.get_player(player_id) {
+            let update = player.get_update_message(player_id.index);
+            self.player_message_state
+                .add_global_message(update, true, true);
+        }
+    }
+
     pub fn set_hand(&mut self, hand: SkaterHand, player_id: PlayerId) {
         if let Some(player) = self.player_message_state.players.get_player_mut(player_id) {
             player.preferred_hand = hand;
-            if let Some((object_index, _)) = player.object {
-                if let Some(GameObject::Skater(_, ref mut skater)) = self.objects[object_index] {
-                    skater.hand = hand;
-                }
-            }
+        }
+        if let Some(skater) = self.skater_for_player_mut(player_id) {
+            skater.hand = hand;
         }
     }
+
     pub(crate) fn move_to_spectator(&mut self, player_id: PlayerId) -> bool {
-        if let Some(player) = self.player_message_state.players.get_player_mut(player_id) {
-            if let Some((object_index, _)) = player.object {
-                player.object = None;
-                self.objects[object_index] = None;
-                let update = player.get_update_message(player_id.index);
-                self.player_message_state
-                    .add_global_message(update, true, true);
-                return true;
-            }
+        if self.clear_skater_assignment(player_id) {
+            self.broadcast_player_update(player_id);
+            true
+        } else {
+            false
         }
-        false
     }
 
     pub(crate) fn spawn_skater(
@@ -271,44 +347,50 @@ impl HQMServerState {
         rot: Rot3,
         keep_stick_position: bool,
     ) -> bool {
-        if let Some(player) = self.player_message_state.players.get_player_mut(player_id) {
-            if let Some((object_index, ref mut team2)) = player.object {
-                if let Some(GameObject::Skater(_, ref mut skater)) = self.objects[object_index] {
-                    let mut new_skater = SkaterObject::new(pos, rot, player.preferred_hand);
-                    if keep_stick_position {
-                        let stick_pos_diff = skater.stick_pos - skater.body.pos;
-                        let frame_change = rot * skater.body.rot.inverse();
-                        new_skater.stick_pos = pos + frame_change * stick_pos_diff;
-                        new_skater.stick_rot = frame_change * skater.stick_rot;
-                        new_skater.stick_placement = skater.stick_placement;
-                        new_skater.stick_placement_delta = skater.stick_placement_delta;
-                    }
-                    *skater = new_skater;
-                    *team2 = team;
-                    let update = player.get_update_message(player_id.index);
-                    self.player_message_state
-                        .add_global_message(update, true, true);
-                    return true;
-                } else {
-                    unreachable!();
-                }
-            } else {
-                let hand = player.preferred_hand;
+        let Some(player) = self.player_message_state.players.get_player(player_id) else {
+            return false;
+        };
+        let hand = player.preferred_hand;
+        let has_assignment = player.skater_assignment().is_some();
 
-                let skater = SkaterObject::new(pos, rot, hand);
-                if let Some(object_index) = self.objects.spawn_skater(player_id, skater) {
-                    player.object = Some((object_index, team));
-                    if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
-                        data.view_player_index = player_id.index;
-                    }
-                    let update = player.get_update_message(player_id.index);
-                    self.player_message_state
-                        .add_global_message(update, true, true);
-                    return true;
-                }
+        if has_assignment {
+            let Some(skater) = self.skater_for_player_mut(player_id) else {
+                warn!(?player_id, "player skater assignment is invalid");
+                return false;
+            };
+            let mut new_skater = SkaterObject::new(pos, rot, hand);
+            if keep_stick_position {
+                let stick_pos_diff = skater.stick_pos - skater.body.pos;
+                let frame_change = rot * skater.body.rot.inverse();
+                new_skater.stick_pos = pos + frame_change * stick_pos_diff;
+                new_skater.stick_rot = frame_change * skater.stick_rot;
+                new_skater.stick_placement = skater.stick_placement;
+                new_skater.stick_placement_delta = skater.stick_placement_delta;
+            }
+            *skater = new_skater;
+            self.player_message_state
+                .players
+                .get_player_mut(player_id)
+                .expect("player must exist while updating its skater")
+                .set_skater_team(team);
+        } else {
+            let skater = SkaterObject::new(pos, rot, hand);
+            let Some(object_slot) = self.objects.spawn_skater(player_id, skater) else {
+                return false;
+            };
+            let player = self
+                .player_message_state
+                .players
+                .get_player_mut(player_id)
+                .expect("player must exist while spawning its skater");
+            player.set_skater_assignment(object_slot, team);
+            if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
+                data.view_player_index = player_id.index;
             }
         }
-        false
+
+        self.broadcast_player_update(player_id);
+        true
     }
 
     pub fn remove_player(&mut self, player_id: PlayerId, on_recording: bool) -> bool {
@@ -317,13 +399,17 @@ impl HQMServerState {
                 player_index: player_id.index,
                 data: None,
             };
-            let object_index = player.object.map(|x| x.0);
+            let has_skater = player.has_skater();
+
+            if has_skater && !self.clear_skater_assignment(player_id) {
+                warn!(
+                    ?player_id,
+                    "player skater assignment is invalid during player removal"
+                );
+            }
 
             self.player_message_state.players[player_id.index.0].0 += 1;
             self.player_message_state.players[player_id.index.0].1 = None;
-            if let Some(object_index) = object_index {
-                self.objects[object_index] = None;
-            }
 
             self.player_message_state
                 .add_global_message(update, true, on_recording);
@@ -726,8 +812,9 @@ impl HQMServer {
                 .players
                 .get_player_mut(player_id)
             {
+                let has_skater = player.has_skater();
                 if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
-                    if player.object.is_some() {
+                    if has_skater {
                         self.state
                             .player_message_state
                             .add_directed_server_chat_message(
@@ -1580,5 +1667,37 @@ mod tests {
 
         assert_eq!(&buf[..9], b"Hock\x05\x2a\x00\x00\x00");
         assert!(buf.len() > 9);
+    }
+
+    #[test]
+    fn skater_assignment_and_object_slot_are_updated_together() {
+        let mut state = HQMServerState::new();
+        let player_id = state
+            .player_message_state
+            .add_player("test", "127.0.0.1:12345".parse().unwrap())
+            .unwrap();
+
+        assert!(state.spawn_skater(player_id, Team::Red, Vec3::ZERO, Rot3::IDENTITY, false,));
+        let object_slot = state
+            .player_message_state
+            .players
+            .get_player(player_id)
+            .and_then(|player| player.skater_assignment())
+            .map(|(slot, _)| slot)
+            .unwrap();
+        assert!(matches!(
+            state.objects[object_slot.index()],
+            Some(GameObject::Skater(id, _)) if id == player_id
+        ));
+
+        assert!(state.move_to_spectator(player_id));
+        assert!(
+            state
+                .player_message_state
+                .players
+                .get_player(player_id)
+                .is_some_and(|player| !player.has_skater())
+        );
+        assert!(state.objects[object_slot.index()].is_none());
     }
 }

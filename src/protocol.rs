@@ -582,7 +582,7 @@ pub(crate) fn write_message(writer: &mut HQMMessageWriter, message: &HQMMessage)
                 Some(p) => (true, p.player_name.as_bytes()),
             };
             let (object_index, team_num) = match data.as_ref().and_then(|x| x.object) {
-                Some((i, team)) => (i as u32, team.get_num()),
+                Some((slot, team)) => (slot.index() as u32, team.get_num()),
                 None => (u32::MAX, u32::MAX),
             };
             writer.write_bits(1, if in_server { 1 } else { 0 });
