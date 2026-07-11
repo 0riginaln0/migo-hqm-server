@@ -157,23 +157,65 @@ impl HQMTickHistory {
     }
 }
 
+struct ReplicationState {
+    last_scoreboard: Option<ScoreboardValues>,
+    packet: u32,
+    saved_packets: Box<ArrayDeque<[ObjectPacket; 32], 192, Wrapping>>,
+    saved_pings: Box<ArrayDeque<Instant, 100, Wrapping>>,
+}
+
+impl ReplicationState {
+    fn new() -> Self {
+        Self {
+            last_scoreboard: None,
+            packet: u32::MAX,
+            saved_packets: Box::new(ArrayDeque::new()),
+            saved_pings: Box::new(ArrayDeque::new()),
+        }
+    }
+
+    fn new_game(&mut self) {
+        self.last_scoreboard = None;
+        self.packet = u32::MAX;
+        self.saved_packets.clear();
+        self.saved_pings.clear();
+    }
+}
+
+struct RecordingState {
+    data: BytesMut,
+    message_pos: usize,
+    last_packet: u32,
+}
+
+impl RecordingState {
+    fn new() -> Self {
+        Self {
+            data: BytesMut::with_capacity(64 * 1024 * 1024),
+            message_pos: 0,
+            last_packet: u32::MAX,
+        }
+    }
+
+    fn new_game(&mut self) {
+        self.data.clear();
+        self.message_pos = 0;
+        self.last_packet = u32::MAX;
+    }
+
+    fn take_data(&mut self) -> BytesMut {
+        std::mem::replace(&mut self.data, BytesMut::new())
+    }
+}
+
 pub(crate) struct HQMServerState {
     pub(crate) player_message_state: ServerPlayersAndMessages,
 
     pub(crate) objects: Vec<Option<GameObject>>,
 
     pub(crate) replay: HQMTickHistory,
-
-    last_scoreboard: Option<ScoreboardValues>,
-
-    packet: u32,
-    recording_data: BytesMut,
-    recording_msg_pos: usize,
-    recording_last_packet: u32,
-
-    saved_packets: Box<ArrayDeque<[ObjectPacket; 32], 192, Wrapping>>,
-
-    saved_pings: Box<ArrayDeque<Instant, 100, Wrapping>>,
+    replication: ReplicationState,
+    recording: RecordingState,
 }
 
 impl HQMServerState {
@@ -182,16 +224,8 @@ impl HQMServerState {
             player_message_state: ServerPlayersAndMessages::new(),
             objects: vec![None; 32],
             replay: HQMTickHistory::new(),
-            last_scoreboard: None,
-
-            recording_data: BytesMut::with_capacity(64 * 1024 * 1024),
-            recording_msg_pos: 0,
-            packet: u32::MAX,
-            recording_last_packet: u32::MAX,
-
-            saved_packets: Box::new(ArrayDeque::new()),
-
-            saved_pings: Box::new(ArrayDeque::new()),
+            replication: ReplicationState::new(),
+            recording: RecordingState::new(),
         }
     }
 
@@ -199,17 +233,10 @@ impl HQMServerState {
         self.player_message_state.new_game();
 
         self.replay.clear();
-
-        self.recording_msg_pos = 0;
-        self.packet = u32::MAX;
-        self.recording_last_packet = u32::MAX;
-
-        self.saved_packets.clear();
-
-        self.saved_pings.clear();
+        self.replication.new_game();
+        self.recording.new_game();
 
         self.objects = vec![None; 32];
-        self.last_scoreboard = None;
     }
 
     pub fn set_hand(&mut self, hand: SkaterHand, player_id: PlayerId) {
@@ -462,8 +489,9 @@ impl HQMServer {
 
             let duration_since_packet =
                 if data.game_id == current_game_id && data.known_packet < new_known_packet {
-                    let ticks = &self.state.saved_pings;
+                    let ticks = &self.state.replication.saved_pings;
                     self.state
+                        .replication
                         .packet
                         .checked_sub(new_known_packet)
                         .and_then(|diff| ticks.get(diff as usize))
@@ -883,20 +911,40 @@ impl HQMServer {
     }
 
     fn player_exit<B: GameMode>(&mut self, addr: SocketAddr, behaviour: &mut B) {
-        let player = self
+        let player_id = self
             .state
             .player_message_state
             .players
-            .find_player_by_addr(addr);
+            .find_player_by_addr(addr)
+            .map(|(player_id, _)| player_id);
 
-        if let Some((player_id, player)) = player {
-            let player_name = player.player_name.clone();
-            behaviour.before_player_exit(self.into(), player_id, ExitReason::Disconnected);
-            self.state.remove_player(player_id, true);
+        if let Some(player_id) = player_id
+            && let Some(player_name) =
+                self.disconnect_player(player_id, ExitReason::Disconnected, behaviour)
+        {
             info!("{} ({}) exited server", player_name, player_id);
             let msg = format!("{player_name} exited");
             self.state.player_message_state.add_server_chat_message(msg);
         }
+    }
+
+    fn disconnect_player<B: GameMode>(
+        &mut self,
+        player_id: PlayerId,
+        reason: ExitReason,
+        behaviour: &mut B,
+    ) -> Option<Rc<str>> {
+        let player_name = self
+            .state
+            .player_message_state
+            .players
+            .get_player(player_id)?
+            .player_name
+            .clone();
+        behaviour.before_player_exit(self.into(), player_id, reason);
+        self.state
+            .remove_player(player_id, true)
+            .then_some(player_name)
     }
 
     fn add_player(&mut self, player_name: &str, addr: SocketAddr) -> Option<PlayerId> {
@@ -923,7 +971,7 @@ impl HQMServer {
         let packets = self.get_packets();
 
         let scoreboard = behaviour.after_tick(self.into(), &events);
-        self.state.last_scoreboard = Some(scoreboard);
+        self.state.replication.last_scoreboard = Some(scoreboard);
 
         if self.state.replay.history_length > 0 {
             let new_replay_tick = ReplayTick {
@@ -939,8 +987,8 @@ impl HQMServer {
             self.state.replay.saved_history.clear();
         }
 
-        self.state.saved_packets.push_front(packets);
-        self.state.packet = self.state.packet.wrapping_add(1);
+        self.state.replication.saved_packets.push_front(packets);
+        self.state.replication.packet = self.state.replication.packet.wrapping_add(1);
 
         if self.config.recording_enabled != ReplayRecording::Off
             && behaviour.include_tick_in_recording((&*self).into())
@@ -973,7 +1021,7 @@ impl HQMServer {
                 if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
                     data.inactivity += 1;
                     if data.inactivity > 500 {
-                        Some((player_id, player.player_name.clone()))
+                        Some(player_id)
                     } else {
                         None
                     }
@@ -982,9 +1030,12 @@ impl HQMServer {
                 }
             })
             .collect();
-        for (player_id, player_name) in inactive_players {
-            behaviour.before_player_exit(self.into(), player_id, ExitReason::Timeout);
-            self.state.remove_player(player_id, true);
+        for player_id in inactive_players {
+            let Some(player_name) =
+                self.disconnect_player(player_id, ExitReason::Timeout, behaviour)
+            else {
+                continue;
+            };
             info!("{} ({}) timed out", player_name, player_id);
             let chat_msg = format!("{player_name} timed out");
             self.state
@@ -993,62 +1044,74 @@ impl HQMServer {
         }
     }
 
+    fn advance_tick<B: GameMode>(&mut self, behaviour: &mut B) -> Option<TickOutput> {
+        if self.real_player_count() == 0 {
+            if self.has_current_game_been_active {
+                info!("Game {} abandoned", self.game_id);
+                self.new_game();
+            }
+            return None;
+        }
+
+        if !self.has_current_game_been_active {
+            self.start_time = Utc::now();
+            self.has_current_game_been_active = true;
+            behaviour.game_started(self.into());
+            info!("New game {} started", self.game_id);
+        }
+
+        self.remove_inactive_players(behaviour);
+        behaviour.before_tick(self.into());
+
+        let (game_step, forced_view, scoreboard) =
+            if let Some((forced_view, tick)) = self.state.replay.check_replay() {
+                let scoreboard = self.state.replication.last_scoreboard.unwrap_or_default();
+                self.state
+                    .replication
+                    .saved_packets
+                    .push_front(tick.packets);
+                self.state.replication.packet = self.state.replication.packet.wrapping_add(1);
+                (
+                    tick.game_step,
+                    forced_view.map(|player_id| player_id.index),
+                    scoreboard,
+                )
+            } else {
+                let scoreboard = self.game_step(behaviour);
+                (self.state.replay.game_step, None, scoreboard)
+            };
+
+        self.state
+            .replication
+            .saved_pings
+            .push_front(Instant::now());
+        Some(TickOutput {
+            game_step,
+            forced_view,
+            scoreboard,
+        })
+    }
+
     pub(crate) async fn tick<B: GameMode>(
         &mut self,
         socket: &UdpSocket,
         behaviour: &mut B,
         write_buf: &mut BytesMut,
     ) {
-        if self.real_player_count() != 0 {
-            if !self.has_current_game_been_active {
-                self.start_time = Utc::now();
-                self.has_current_game_been_active = true;
-                behaviour.game_started(self.into());
-                info!("New game {} started", self.game_id);
-            }
-
-            let (game_step, forced_view, scoreboard) = tokio::task::block_in_place(|| {
-                self.remove_inactive_players(behaviour);
-
-                behaviour.before_tick(self.into());
-
-                let has_replay_data = self.state.replay.check_replay();
-
-                let res = if let Some((forced_view, tick)) = has_replay_data {
-                    let forced_view = forced_view.map(|x| x.index);
-                    let game_step = tick.game_step;
-                    let packets = tick.packets;
-                    let scoreboard = self.state.last_scoreboard.unwrap_or_default();
-
-                    self.state.saved_packets.push_front(packets);
-
-                    self.state.packet = self.state.packet.wrapping_add(1);
-                    (game_step, forced_view, scoreboard)
-                } else {
-                    let scoreboard = self.game_step(behaviour);
-                    (self.state.replay.game_step, None, scoreboard)
-                };
-
-                self.state.saved_pings.push_front(Instant::now());
-
-                res
-            });
-
+        let tick_output = tokio::task::block_in_place(|| self.advance_tick(behaviour));
+        if let Some(tick_output) = tick_output {
             send_updates(
                 self.game_id,
-                &self.state.saved_packets,
-                game_step,
-                &scoreboard,
-                self.state.packet,
+                &self.state.replication.saved_packets,
+                tick_output.game_step,
+                &tick_output.scoreboard,
+                self.state.replication.packet,
                 &self.state.player_message_state.players,
                 socket,
-                forced_view,
+                tick_output.forced_view,
                 write_buf,
             )
             .await;
-        } else if self.has_current_game_been_active {
-            info!("Game {} abandoned", self.game_id);
-            self.new_game();
         }
     }
 
@@ -1067,7 +1130,7 @@ impl HQMServer {
 
         self.has_current_game_been_active = false;
 
-        let old_recording_data = std::mem::replace(&mut self.state.recording_data, BytesMut::new());
+        let old_recording_data = self.state.recording.take_data();
 
         if self.config.recording_enabled == ReplayRecording::On && !old_recording_data.is_empty() {
             self.save_recording(&old_recording_data);
@@ -1078,16 +1141,16 @@ impl HQMServer {
 
     fn write_recording_tick(&mut self, scoreboard: &ScoreboardValues) {
         let messages_to_write =
-            &self.state.player_message_state.recording_messages[self.state.recording_msg_pos..];
+            &self.state.player_message_state.recording_messages[self.state.recording.message_pos..];
         let remaining_messages = messages_to_write.len();
-        self.state.recording_data.reserve(
+        self.state.recording.data.reserve(
             9 // Header, time, score, period, etc.
             + 8 // Position metadata
             + (32*30) // 32 objects that can be at most 30 bytes each
             + 4 // Message metadata
             + remaining_messages * 66, // Chat message can be up to 66 bytes each
         );
-        let mut writer = HQMMessageWriter::new(&mut self.state.recording_data);
+        let mut writer = HQMMessageWriter::new(&mut self.state.recording.data);
 
         writer.write_byte_aligned(5);
         writer.write_bits(
@@ -1104,25 +1167,32 @@ impl HQMServer {
         writer.write_bits(16, scoreboard.goal_message_timer);
         writer.write_bits(8, scoreboard.period); // 8.1
 
-        let packets = &self.state.saved_packets;
+        let packets = &self.state.replication.saved_packets;
 
         write_objects(
             &mut writer,
             packets,
-            self.state.packet,
-            self.state.recording_last_packet,
+            self.state.replication.packet,
+            self.state.recording.last_packet,
         );
-        self.state.recording_last_packet = self.state.packet;
+        self.state.recording.last_packet = self.state.replication.packet;
 
         writer.write_bits(16, remaining_messages as u32);
-        writer.write_bits(16, self.state.recording_msg_pos as u32);
+        writer.write_bits(16, self.state.recording.message_pos as u32);
 
         for message in messages_to_write {
             write_message(&mut writer, Rc::as_ref(message));
         }
-        self.state.recording_msg_pos = self.state.player_message_state.recording_messages.len();
+        self.state.recording.message_pos = self.state.player_message_state.recording_messages.len();
         writer.recording_fix();
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TickOutput {
+    game_step: u32,
+    forced_view: Option<PlayerIndex>,
+    scoreboard: ScoreboardValues,
 }
 
 #[derive(Clone, Debug)]
