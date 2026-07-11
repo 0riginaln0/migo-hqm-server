@@ -84,107 +84,165 @@ pub(crate) trait PlayerListExt {
     fn find_empty_slot(&self) -> Option<PlayerIndex>;
 }
 
-impl PlayerListExt for [(u32, Option<ServerPlayer>)] {
+pub(crate) const MAX_PLAYERS: usize = 64;
+
+struct PlayerSlot {
+    generation: u32,
+    player: Option<ServerPlayer>,
+}
+
+/// Fixed-size player storage with generation-checked player identifiers.
+pub(crate) struct PlayerSlots {
+    slots: [PlayerSlot; MAX_PLAYERS],
+}
+
+impl PlayerSlots {
+    fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| PlayerSlot {
+                generation: 0,
+                player: None,
+            }),
+        }
+    }
+
+    fn insert(&mut self, index: PlayerIndex, player: ServerPlayer) -> PlayerId {
+        let slot = &mut self.slots[index.0];
+        debug_assert!(slot.player.is_none());
+        slot.player = Some(player);
+        PlayerId {
+            index,
+            counter: slot.generation,
+        }
+    }
+
+    pub(crate) fn remove(&mut self, player_id: PlayerId) -> Option<ServerPlayer> {
+        let slot = self.slots.get_mut(player_id.index.0)?;
+        if slot.generation != player_id.counter {
+            return None;
+        }
+
+        let player = slot.player.take()?;
+        slot.generation = slot.generation.wrapping_add(1);
+        Some(player)
+    }
+}
+
+impl PlayerListExt for PlayerSlots {
     fn get_player_by_index(&self, player_index: PlayerIndex) -> Option<(PlayerId, &ServerPlayer)> {
-        self.get(player_index.0).and_then(|(c, x)| {
-            x.as_ref().map(|p| {
+        self.slots.get(player_index.0).and_then(|slot| {
+            slot.player.as_ref().map(|player| {
                 (
                     PlayerId {
                         index: player_index,
-                        counter: *c,
+                        counter: slot.generation,
                     },
-                    p,
+                    player,
                 )
             })
         })
     }
 
     fn get_player(&self, player_id: PlayerId) -> Option<&ServerPlayer> {
-        self.get(player_id.index.0).and_then(|(c, x)| match x {
-            Some(p) if *c == player_id.counter => Some(p),
-            _ => None,
-        })
+        self.slots
+            .get(player_id.index.0)
+            .and_then(|slot| match &slot.player {
+                Some(player) if slot.generation == player_id.counter => Some(player),
+                _ => None,
+            })
     }
 
     fn get_player_mut_by_index(
         &mut self,
         player_index: PlayerIndex,
     ) -> Option<(PlayerId, &mut ServerPlayer)> {
-        self.get_mut(player_index.0).and_then(|(c, x)| {
-            x.as_mut().map(|p| {
+        self.slots.get_mut(player_index.0).and_then(|slot| {
+            slot.player.as_mut().map(|player| {
                 (
                     PlayerId {
                         index: player_index,
-                        counter: *c,
+                        counter: slot.generation,
                     },
-                    p,
+                    player,
                 )
             })
         })
     }
 
     fn get_player_mut(&mut self, player_id: PlayerId) -> Option<&mut ServerPlayer> {
-        self.get_mut(player_id.index.0).and_then(|(c, x)| match x {
-            Some(p) if *c == player_id.counter => Some(p),
-            _ => None,
-        })
+        self.slots
+            .get_mut(player_id.index.0)
+            .and_then(|slot| match &mut slot.player {
+                Some(player) if slot.generation == player_id.counter => Some(player),
+                _ => None,
+            })
     }
 
     fn iter_players(&self) -> impl Iterator<Item = (PlayerId, &ServerPlayer)> {
-        self.iter()
+        self.slots
+            .iter()
             .enumerate()
-            .filter_map(|(player_index, (c, player))| {
-                player.as_ref().map(|p| {
+            .filter_map(|(player_index, slot)| {
+                slot.player.as_ref().map(|player| {
                     (
                         PlayerId {
                             index: PlayerIndex(player_index),
-                            counter: *c,
+                            counter: slot.generation,
                         },
-                        p,
+                        player,
                     )
                 })
             })
     }
 
     fn iter_players_mut(&mut self) -> impl Iterator<Item = (PlayerId, &mut ServerPlayer)> {
-        self.iter_mut()
+        self.slots
+            .iter_mut()
             .enumerate()
-            .filter_map(|(player_index, (c, player))| {
-                player.as_mut().map(|p| {
+            .filter_map(|(player_index, slot)| {
+                slot.player.as_mut().map(|player| {
                     (
                         PlayerId {
                             index: PlayerIndex(player_index),
-                            counter: *c,
+                            counter: slot.generation,
                         },
-                        p,
+                        player,
                     )
                 })
             })
     }
 
     fn find_empty_slot(&self) -> Option<PlayerIndex> {
-        self.iter()
-            .position(|x| x.1.is_none())
+        self.slots
+            .iter()
+            .position(|slot| slot.player.is_none())
             .map(|x| PlayerIndex(x))
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum MessageRetention {
+    Transient,
+    ForLateJoiners,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MessageRecording {
+    Exclude,
+    Include,
+}
+
 pub(crate) struct ServerPlayersAndMessages {
-    pub players: Vec<(u32, Option<ServerPlayer>)>,
+    pub(crate) players: PlayerSlots,
 
     persistent_messages: Vec<Rc<HQMMessage>>,
-    pub(crate) recording_messages: Vec<Rc<HQMMessage>>,
+    recording_messages: Vec<Rc<HQMMessage>>,
 }
 
 impl ServerPlayersAndMessages {
     pub(crate) fn new() -> Self {
-        let mut players = Vec::with_capacity(64);
-        for _ in 0..64 {
-            players.push((0, None));
-        }
-
         Self {
-            players,
+            players: PlayerSlots::new(),
             persistent_messages: vec![],
             recording_messages: vec![],
         }
@@ -195,17 +253,17 @@ impl ServerPlayersAndMessages {
         self.persistent_messages.clear();
 
         let mut messages = Vec::new();
-        for (player_index, (_, p)) in self.players.iter_mut().enumerate() {
-            let player_index = PlayerIndex(player_index);
-            if let Some(player) = p {
-                player.reset(player_index);
-                let update = player.get_update_message(player_index);
-                messages.push((update, true, true));
-            }
+        for (player_id, player) in self.players.iter_players_mut() {
+            player.reset(player_id.index);
+            messages.push(player.get_update_message(player_id.index));
         }
 
-        for (message, persistent, recording) in messages {
-            self.add_global_message(message, persistent, recording);
+        for message in messages {
+            self.broadcast_message(
+                message,
+                MessageRetention::ForLateJoiners,
+                MessageRecording::Include,
+            );
         }
     }
 
@@ -218,7 +276,7 @@ impl ServerPlayersAndMessages {
             player_index: Some(sender_index),
             message: message.into(),
         };
-        self.add_global_message(chat, false, true);
+        self.broadcast_message(chat, MessageRetention::Transient, MessageRecording::Include);
     }
 
     pub(crate) fn add_server_chat_message(&mut self, message: impl Into<Cow<'static, str>>) {
@@ -226,7 +284,7 @@ impl ServerPlayersAndMessages {
             player_index: None,
             message: message.into(),
         };
-        self.add_global_message(chat, false, true);
+        self.broadcast_message(chat, MessageRetention::Transient, MessageRecording::Include);
     }
 
     pub fn add_directed_chat_message(
@@ -282,20 +340,24 @@ impl ServerPlayersAndMessages {
             goal_player_index,
             assist_player_index,
         };
-        self.add_global_message(message, true, true);
+        self.broadcast_message(
+            message,
+            MessageRetention::ForLateJoiners,
+            MessageRecording::Include,
+        );
     }
 
-    pub(crate) fn add_global_message(
+    pub(crate) fn broadcast_message(
         &mut self,
         message: HQMMessage,
-        persistent: bool,
-        recording: bool,
+        retention: MessageRetention,
+        recording: MessageRecording,
     ) {
         let rc = Rc::new(message);
-        if recording {
+        if matches!(recording, MessageRecording::Include) {
             self.recording_messages.push(rc.clone());
         }
-        if persistent {
+        if matches!(retention, MessageRetention::ForLateJoiners) {
             self.persistent_messages.push(rc.clone());
         }
         for (_, player) in self.players.iter_players_mut() {
@@ -344,12 +406,16 @@ impl ServerPlayersAndMessages {
                     message: Cow::Owned(message.to_owned()),
                 });
 
-                for (_, player) in self.players.iter_players_mut() {
-                    if player.team().is_some_and(|t| t == team) {
-                        player.add_message(change1.clone());
-                        player.add_message(chat.clone());
-                        player.add_message(change2.clone());
-                    }
+                self.send_to_team(team, &[change1, chat, change2]);
+            }
+        }
+    }
+
+    fn send_to_team(&mut self, team: Team, messages: &[Rc<HQMMessage>]) {
+        for (_, player) in self.players.iter_players_mut() {
+            if player.team().is_some_and(|player_team| player_team == team) {
+                for message in messages {
+                    player.add_message(message.clone());
                 }
             }
         }
@@ -370,13 +436,13 @@ impl ServerPlayersAndMessages {
                 );
                 let update = new_player.get_update_message(player_index);
 
-                self.players[player_index.0].1 = Some(new_player);
-                let player_id = PlayerId {
-                    index: player_index,
-                    counter: self.players[player_index.0].0,
-                };
+                let player_id = self.players.insert(player_index, new_player);
 
-                self.add_global_message(update, true, true);
+                self.broadcast_message(
+                    update,
+                    MessageRetention::ForLateJoiners,
+                    MessageRecording::Include,
+                );
 
                 Some(player_id)
             }
@@ -391,18 +457,26 @@ impl ServerPlayersAndMessages {
                 let new_player = ServerPlayer::new_bot(player_name);
                 let update = new_player.get_update_message(player_index);
 
-                self.players[player_index.0].1 = Some(new_player);
-                let player_id = PlayerId {
-                    index: player_index,
-                    counter: self.players[player_index.0].0,
-                };
+                let player_id = self.players.insert(player_index, new_player);
 
-                self.add_global_message(update, true, true);
+                self.broadcast_message(
+                    update,
+                    MessageRetention::ForLateJoiners,
+                    MessageRecording::Include,
+                );
 
                 Some(player_id)
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn recording_messages_since(&self, message_pos: usize) -> &[Rc<HQMMessage>] {
+        &self.recording_messages[message_pos..]
+    }
+
+    pub(crate) fn recording_message_count(&self) -> usize {
+        self.recording_messages.len()
     }
 }
 
@@ -599,6 +673,25 @@ impl ServerPlayer {
         if let Some((_, current_team)) = &mut self.object {
             *current_team = team;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reused_player_slot_invalidates_the_previous_player_id() {
+        let mut slots = PlayerSlots::new();
+        let index = PlayerIndex(0);
+        let previous_id = slots.insert(index, ServerPlayer::new_bot("previous"));
+
+        assert!(slots.remove(previous_id).is_some());
+
+        let current_id = slots.insert(index, ServerPlayer::new_bot("current"));
+        assert_ne!(previous_id, current_id);
+        assert!(slots.get_player(previous_id).is_none());
+        assert!(slots.get_player(current_id).is_some());
     }
 }
 

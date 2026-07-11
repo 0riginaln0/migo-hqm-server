@@ -29,7 +29,8 @@ use crate::game::{
 };
 use crate::players::NetworkPlayerData;
 pub(crate) use crate::players::{
-    HQMMessage, MuteStatus, PlayerListExt, ServerPlayer, ServerPlayerData, ServerPlayersAndMessages,
+    HQMMessage, MessageRecording, MessageRetention, MuteStatus, PlayerListExt, PlayerSlots,
+    ServerPlayerData, ServerPlayersAndMessages,
 };
 use crate::protocol::{
     HQMClientToServerMessage, HQMMessageCodec, HQMMessageWriter, ObjectPacket, write_message,
@@ -445,8 +446,11 @@ impl HQMServerState {
     fn broadcast_player_update(&mut self, player_id: PlayerId) {
         if let Some(player) = self.player_message_state.players.get_player(player_id) {
             let update = player.get_update_message(player_id.index);
-            self.player_message_state
-                .add_global_message(update, true, true);
+            self.player_message_state.broadcast_message(
+                update,
+                MessageRetention::ForLateJoiners,
+                MessageRecording::Include,
+            );
         }
     }
 
@@ -537,11 +541,20 @@ impl HQMServerState {
                 );
             }
 
-            self.player_message_state.players[player_id.index.0].0 += 1;
-            self.player_message_state.players[player_id.index.0].1 = None;
-
             self.player_message_state
-                .add_global_message(update, true, on_recording);
+                .players
+                .remove(player_id)
+                .expect("player must exist while removing it");
+
+            self.player_message_state.broadcast_message(
+                update,
+                MessageRetention::ForLateJoiners,
+                if on_recording {
+                    MessageRecording::Include
+                } else {
+                    MessageRecording::Exclude
+                },
+            );
 
             true
         } else {
@@ -1336,8 +1349,10 @@ impl HQMServer {
     }
 
     fn write_recording_tick(&mut self, scoreboard: &ScoreboardValues) {
-        let messages_to_write =
-            &self.state.player_message_state.recording_messages[self.state.recording.message_pos..];
+        let messages_to_write = self
+            .state
+            .player_message_state
+            .recording_messages_since(self.state.recording.message_pos);
         let remaining_messages = messages_to_write.len();
         self.state.recording.data.reserve(
             9 // Header, time, score, period, etc.
@@ -1376,7 +1391,8 @@ impl HQMServer {
         for message in messages_to_write {
             write_message(&mut writer, Rc::as_ref(message));
         }
-        self.state.recording.message_pos = self.state.player_message_state.recording_messages.len();
+        self.state.recording.message_pos =
+            self.state.player_message_state.recording_message_count();
         writer.recording_fix();
     }
 }
@@ -1536,7 +1552,7 @@ async fn send_updates(
     history: &PacketHistory,
     game_step: u32,
     scoreboard: &ScoreboardValues,
-    players: &[(u32, Option<ServerPlayer>)],
+    players: &PlayerSlots,
     socket: &UdpSocket,
     force_view: Option<PlayerIndex>,
     write_buf: &mut BytesMut,
