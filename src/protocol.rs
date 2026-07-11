@@ -202,6 +202,7 @@ pub fn convert_matrix_from_network(b: u8, v1: u32, v2: u32) -> Rot3 {
 }
 
 #[allow(dead_code)]
+#[inline]
 fn convert_rot_column_from_network(b: u8, v: u32) -> Vec3 {
     let start = v & 7;
 
@@ -209,23 +210,23 @@ fn convert_rot_column_from_network(b: u8, v: u32) -> Vec3 {
     let mut pos = 3;
     while pos < b {
         let step = (v >> pos) & 3;
-        let c1 = (temp1 + temp2).normalize();
-        let c2 = (temp2 + temp3).normalize();
-        let c3 = (temp1 + temp3).normalize();
         match step {
             0 => {
-                temp2 = c1;
-                temp3 = c3;
+                temp2 = (temp1 + temp2).normalize();
+                temp3 = (temp1 + temp3).normalize();
             }
             1 => {
-                temp1 = c1;
-                temp3 = c2;
+                temp1 = (temp1 + temp2).normalize();
+                temp3 = (temp2 + temp3).normalize();
             }
             2 => {
-                temp1 = c3;
-                temp2 = c2;
+                temp1 = (temp1 + temp3).normalize();
+                temp2 = (temp2 + temp3).normalize();
             }
             3 => {
+                let c1 = (temp1 + temp2).normalize();
+                let c2 = (temp2 + temp3).normalize();
+                let c3 = (temp1 + temp3).normalize();
                 temp1 = c1;
                 temp2 = c2;
                 temp3 = c3;
@@ -238,6 +239,7 @@ fn convert_rot_column_from_network(b: u8, v: u32) -> Vec3 {
     (temp1 + temp2 + temp3).normalize()
 }
 
+#[inline]
 fn convert_rot_column_to_network(b: u8, v: Vec3) -> u32 {
     let oct = (v[0] < 0.0) as u32 | ((v[2] < 0.0) as u32) << 1 | ((v[1] < 0.0) as u32) << 2;
 
@@ -245,30 +247,32 @@ fn convert_rot_column_to_network(b: u8, v: Vec3) -> u32 {
     let mut res = oct;
 
     for i in (3..b).step_by(2) {
-        let m4 = (t1 + t2).normalize();
-        let m5 = (t2 + t3).normalize();
-        let m6 = (t1 + t3).normalize();
+        let s4 = t1 + t2;
+        let s5 = t2 + t3;
+        let s6 = t1 + t3;
 
-        if m6.cross(m4).dot(v) < 0.0 {
-            if m4.cross(m5).dot(v) < 0.0 {
-                if m5.cross(m6).dot(v) < 0.0 {
+        // The normalization factors are positive, so they do not affect the
+        // signs used to select a child triangle.
+        if s6.cross(s4).dot(v) < 0.0 {
+            if s4.cross(s5).dot(v) < 0.0 {
+                if s5.cross(s6).dot(v) < 0.0 {
                     res |= 3 << i;
-                    t1 = m4;
-                    t2 = m5;
-                    t3 = m6;
+                    t1 = s4.normalize();
+                    t2 = s5.normalize();
+                    t3 = s6.normalize();
                 } else {
                     res |= 2 << i;
-                    t1 = m6;
-                    t2 = m5;
+                    t1 = s6.normalize();
+                    t2 = s5.normalize();
                 }
             } else {
                 res |= 1 << i;
-                t1 = m4;
-                t3 = m5;
+                t1 = s4.normalize();
+                t3 = s5.normalize();
             }
         } else {
-            t2 = m4;
-            t3 = m6;
+            t2 = s4.normalize();
+            t3 = s6.normalize();
         }
     }
     res
