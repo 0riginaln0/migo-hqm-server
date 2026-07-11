@@ -4,7 +4,8 @@ use crate::game::{
     SkaterObject, Team,
 };
 use crate::game::{PhysicsEvent, PlayerId};
-use crate::server::{HQMServer, PlayerListExt};
+use crate::players::PlayerListExt;
+use crate::server::{GameObject, HQMServer};
 use arrayvec::ArrayVec;
 use glam::{EulerRot, Vec2, Vec3};
 use glamx::Rot3;
@@ -27,18 +28,26 @@ type CollisionList = SmallVec<[Collision; 32]>;
 impl HQMServer {
     pub(crate) fn simulate_step(&mut self) -> PhysicsEventList {
         let mut events: PhysicsEventList = SmallVec::new();
-        let mut players: ArrayVec<(PlayerId, &mut SkaterObject, &mut PlayerInput), 32> =
+        let mut players: ArrayVec<(PlayerId, &mut SkaterObject, &PlayerInput), 32> =
             ArrayVec::new();
         let mut pucks: ArrayVec<(usize, &mut Puck, Vec3), 32> = ArrayVec::new();
-        for (i, p) in self.state.players.players.iter_players_mut() {
-            if let Some((_, skater, _)) = &mut p.object {
-                players.push((i, skater, &mut p.input));
-            }
-        }
-        for (i, p) in self.state.pucks.iter_mut().enumerate() {
+        for (i, p) in self.state.objects.iter_mut().enumerate() {
             if let Some(p) = p {
-                let old_pos = p.body.pos;
-                pucks.push((i, p, old_pos));
+                match p {
+                    GameObject::Skater(player_id, skater) => {
+                        let player = self
+                            .state
+                            .player_message_state
+                            .players
+                            .get_player(*player_id)
+                            .unwrap();
+                        players.push((*player_id, skater, &player.input))
+                    }
+                    GameObject::Puck(puck) => {
+                        let old_pos = puck.body.pos;
+                        pucks.push((i, puck, old_pos));
+                    }
+                }
             }
         }
 
@@ -121,9 +130,8 @@ impl HQMServer {
     }
 }
 
-
 fn update_sticks_and_pucks(
-    players: &mut [(PlayerId, &mut SkaterObject, &mut PlayerInput)],
+    players: &mut [(PlayerId, &mut SkaterObject, &PlayerInput)],
     pucks: &mut [(usize, &mut Puck, Vec3)],
     rink: &Rink,
     events: &mut PhysicsEventList,
@@ -215,7 +223,7 @@ fn update_sticks_and_pucks(
 
 fn update_stick(
     player: &mut SkaterObject,
-    input: &mut PlayerInput,
+    input: &PlayerInput,
     linear_velocity_before: Vec3,
     angular_velocity_before: Vec3,
     rink: &Rink,
@@ -302,7 +310,7 @@ fn update_stick(
 fn update_player(
     i: usize,
     player: &mut SkaterObject,
-    input: &mut PlayerInput,
+    input: &PlayerInput,
     physics_config: &PhysicsConfiguration,
     rink: &Rink,
     collisions: &mut CollisionList,
@@ -495,7 +503,7 @@ fn update_player(
 }
 
 fn apply_collisions(
-    players: &mut [(PlayerId, &mut SkaterObject, &mut PlayerInput)],
+    players: &mut [(PlayerId, &mut SkaterObject, &PlayerInput)],
     collisions: &[Collision],
 ) {
     for _ in 0..16 {
@@ -763,8 +771,12 @@ fn do_puck_stick_forces(
 ) -> bool {
     let mut res = false;
     for puck_vertex in puck_vertices.iter().copied() {
-        let col =
-            collision_between_puck_vertex_and_stick(puck.body.pos, puck_vertex, player.stick_pos, player.stick_rot);
+        let col = collision_between_puck_vertex_and_stick(
+            puck.body.pos,
+            puck_vertex,
+            player.stick_pos,
+            player.stick_rot,
+        );
         if let Some((dot, normal)) = col {
             res = true;
             let puck_vertex_speed = speed_of_point_including_rotation(
@@ -925,11 +937,12 @@ fn collision_between_puck_vertex_and_stick(
                         {
                             let overlap = (intersection_pos[axis] - local_vertex[axis]) * sign;
                             // Normal in local space is just the axis unit vector
-                            let local_normal = sign * Vec3::from({
-                                let mut a = [0f32; 3];
-                                a[axis] = 1.0;
-                                a
-                            });
+                            let local_normal = sign
+                                * Vec3::from({
+                                    let mut a = [0f32; 3];
+                                    a[axis] = 1.0;
+                                    a
+                                });
                             // Transform normal back to world space
                             let world_normal = stick_rot * local_normal;
                             min_intersection = intersection;

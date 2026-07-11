@@ -1,7 +1,7 @@
-use crate::game::Puck;
 use crate::game::{PhysicsEvent, PlayerId};
+use crate::game::{Puck, ScoreboardValues};
 use crate::gamemode::util::{SpawnPoint, add_players, get_spawnpoint};
-use crate::gamemode::{GameMode, InitialGameValues, PuckExt, ServerMut, ServerMutParts};
+use crate::gamemode::{GameMode, ServerMut, ServerMutParts};
 use glam::Vec3;
 use glamx::Rot3;
 use std::collections::HashMap;
@@ -22,10 +22,10 @@ impl PermanentWarmup {
     }
     fn update_players(&mut self, mut server: ServerMut) {
         let spawn_point = self.spawn_point;
-        let ServerMutParts { players, rink, .. } = server.as_mut_parts();
+        let ServerMutParts { state, rink, .. } = server.as_mut_parts();
         let rink = &*rink;
         add_players(
-            players,
+            state,
             usize::MAX,
             &mut self.team_switch_timer,
             None,
@@ -41,8 +41,8 @@ impl GameMode for PermanentWarmup {
         self.update_players(server);
     }
 
-    fn after_tick(&mut self, _server: ServerMut, _events: &[PhysicsEvent]) {
-        // Nothing
+    fn after_tick(&mut self, _server: ServerMut, _events: &[PhysicsEvent]) -> ScoreboardValues {
+        ScoreboardValues::default()
     }
 
     fn handle_command(
@@ -52,15 +52,6 @@ impl GameMode for PermanentWarmup {
         _arg: &str,
         _player_index: PlayerId,
     ) {
-    }
-
-    fn get_initial_game_values(&mut self) -> InitialGameValues {
-        let warmup_pucks = self.pucks;
-
-        InitialGameValues {
-            values: Default::default(),
-            puck_slots: warmup_pucks,
-        }
     }
 
     fn game_started(&mut self, mut server: ServerMut) {
@@ -73,7 +64,10 @@ impl GameMode for PermanentWarmup {
         for i in 0..warmup_pucks {
             let pos = Vec3::new(puck_line_start + 0.8 * (i as f32), 1.5, length / 2.0);
             let rot = Rot3::IDENTITY;
-            server.pucks_mut().spawn_puck(Puck::new(pos, rot));
+            server
+                .state_mut()
+                .objects_mut()
+                .spawn_puck(Puck::new(pos, rot));
         }
     }
 

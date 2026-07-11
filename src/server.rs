@@ -21,12 +21,15 @@ use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
-use crate::gamemode::{ExitReason, GameMode, InitialGameValues};
+use crate::gamemode::{ExitReason, GameMode};
 
 use crate::ban::{BanCheck, BanCheckResponse};
 use crate::game::{
     PhysicsConfiguration, PlayerId, PlayerIndex, PlayerInput, Puck, Rink, RulesState,
     ScoreboardValues, SkaterHand, SkaterObject, Team,
+};
+pub(crate) use crate::players::{
+    HQMMessage, MuteStatus, PlayerListExt, ServerPlayer, ServerPlayerData, ServerPlayersAndMessages,
 };
 use crate::protocol::{
     HQMClientToServerMessage, HQMMessageCodec, HQMMessageWriter, ObjectPacket, write_message,
@@ -63,484 +66,32 @@ impl HQMClientVersion {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PlayerUpdateData {
-    pub(crate) player_name: Rc<str>,
-    pub(crate) object: Option<(usize, Team)>,
+pub enum GameObject {
+    Skater(PlayerId, SkaterObject),
+    Puck(Puck),
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum HQMMessage {
-    PlayerUpdate {
-        player_index: PlayerIndex,
-        data: Option<PlayerUpdateData>,
-    },
-    Goal {
-        team: Team,
-        goal_player_index: Option<PlayerIndex>,
-        assist_player_index: Option<PlayerIndex>,
-    },
-    Chat {
-        player_index: Option<PlayerIndex>,
-        message: Cow<'static, str>,
-    },
+pub(crate) trait ObjectExt {
+    fn spawn_puck(&mut self, puck: Puck) -> Option<usize>;
+    fn spawn_skater(&mut self, player_id: PlayerId, skater: SkaterObject) -> Option<usize>;
 }
 
-pub(crate) trait PlayerListExt {
-    fn get_player_by_index(
-        &self,
-        player_index: PlayerIndex,
-    ) -> Option<(PlayerId, &HQMServerPlayer)>;
-
-    fn get_player(&self, player_id: PlayerId) -> Option<&HQMServerPlayer>;
-
-    fn get_player_mut_by_index(
-        &mut self,
-        player_index: PlayerIndex,
-    ) -> Option<(PlayerId, &mut HQMServerPlayer)>;
-
-    fn get_player_mut(&mut self, player_id: PlayerId) -> Option<&mut HQMServerPlayer>;
-    fn iter_players(&self) -> impl Iterator<Item = (PlayerId, &HQMServerPlayer)>;
-
-    fn iter_players_mut(&mut self) -> impl Iterator<Item = (PlayerId, &mut HQMServerPlayer)>;
-
-    fn check_admin_or_deny(&mut self, player_id: PlayerId) -> Option<&HQMServerPlayer> {
-        if let Some(player) = self.get_player_mut(player_id) {
-            if player.is_admin {
-                Some(player)
-            } else {
-                player.add_directed_server_chat_message("Please log in before using that command");
-                None
-            }
+impl ObjectExt for [Option<GameObject>] {
+    fn spawn_puck(&mut self, puck: Puck) -> Option<usize> {
+        if let Some(object_index) = self.iter().position(|x| x.is_none()) {
+            self[object_index] = Some(GameObject::Puck(puck));
+            Some(object_index)
         } else {
             None
         }
     }
 
-    fn find_player_by_addr(&self, addr: SocketAddr) -> Option<(PlayerId, &HQMServerPlayer)> {
-        self.iter_players().find(|(_, x)| {
-            if let ServerPlayerData::NetworkPlayer { data } = &x.data {
-                data.addr == addr
-            } else {
-                false
-            }
-        })
-    }
-
-    fn find_player_by_addr_mut(
-        &mut self,
-        addr: SocketAddr,
-    ) -> Option<(PlayerId, &mut HQMServerPlayer)> {
-        self.iter_players_mut().find(|(_, x)| {
-            if let ServerPlayerData::NetworkPlayer { data } = &x.data {
-                data.addr == addr
-            } else {
-                false
-            }
-        })
-    }
-}
-
-pub(crate) type ServerStatePlayerItem = (u32, Option<HQMServerPlayer>);
-
-impl PlayerListExt for [ServerStatePlayerItem] {
-    fn get_player_by_index(
-        &self,
-        player_index: PlayerIndex,
-    ) -> Option<(PlayerId, &HQMServerPlayer)> {
-        self.get(player_index.0).and_then(|(c, x)| {
-            x.as_ref().map(|p| {
-                (
-                    PlayerId {
-                        index: player_index,
-                        counter: *c,
-                    },
-                    p,
-                )
-            })
-        })
-    }
-
-    fn get_player(&self, player_id: PlayerId) -> Option<&HQMServerPlayer> {
-        self.get(player_id.index.0).and_then(|(c, x)| match x {
-            Some(p) if *c == player_id.counter => Some(p),
-            _ => None,
-        })
-    }
-
-    fn get_player_mut_by_index(
-        &mut self,
-        player_index: PlayerIndex,
-    ) -> Option<(PlayerId, &mut HQMServerPlayer)> {
-        self.get_mut(player_index.0).and_then(|(c, x)| {
-            x.as_mut().map(|p| {
-                (
-                    PlayerId {
-                        index: player_index,
-                        counter: *c,
-                    },
-                    p,
-                )
-            })
-        })
-    }
-
-    fn get_player_mut(&mut self, player_id: PlayerId) -> Option<&mut HQMServerPlayer> {
-        self.get_mut(player_id.index.0).and_then(|(c, x)| match x {
-            Some(p) if *c == player_id.counter => Some(p),
-            _ => None,
-        })
-    }
-
-    fn iter_players(&self) -> impl Iterator<Item = (PlayerId, &HQMServerPlayer)> {
-        self.iter()
-            .enumerate()
-            .filter_map(|(player_index, (c, player))| {
-                player.as_ref().map(|p| {
-                    (
-                        PlayerId {
-                            index: PlayerIndex(player_index),
-                            counter: *c,
-                        },
-                        p,
-                    )
-                })
-            })
-    }
-
-    fn iter_players_mut(&mut self) -> impl Iterator<Item = (PlayerId, &mut HQMServerPlayer)> {
-        self.iter_mut()
-            .enumerate()
-            .filter_map(|(player_index, (c, player))| {
-                player.as_mut().map(|p| {
-                    (
-                        PlayerId {
-                            index: PlayerIndex(player_index),
-                            counter: *c,
-                        },
-                        p,
-                    )
-                })
-            })
-    }
-}
-
-pub(crate) struct HQMServerPlayersAndMessages {
-    pub(crate) players: Vec<ServerStatePlayerItem>,
-
-    persistent_messages: Vec<Rc<HQMMessage>>,
-    recording_messages: Vec<Rc<HQMMessage>>,
-
-    puck_slots: usize,
-}
-
-impl HQMServerPlayersAndMessages {
-    fn new(puck_slots: usize) -> Self {
-        let mut players = Vec::with_capacity(64);
-        for _ in 0..64 {
-            players.push((0, None));
-        }
-
-        Self {
-            players,
-            persistent_messages: vec![],
-            recording_messages: vec![],
-            puck_slots,
-        }
-    }
-
-    fn new_game(&mut self, puck_slots: usize) {
-        self.recording_messages.clear();
-        self.persistent_messages.clear();
-        self.puck_slots = puck_slots;
-
-        let mut messages = Vec::new();
-        for (player_index, (_, p)) in self.players.iter_mut().enumerate() {
-            let player_index = PlayerIndex(player_index);
-            if let Some(player) = p {
-                player.reset(player_index);
-                let update = player.get_update_message(player_index);
-                messages.push((update, true, true));
-            }
-        }
-
-        for (message, persistent, recording) in messages {
-            self.add_global_message(message, persistent, recording);
-        }
-    }
-
-    pub fn add_user_chat_message(
-        &mut self,
-        message: impl Into<Cow<'static, str>>,
-        sender_index: PlayerIndex,
-    ) {
-        let chat = HQMMessage::Chat {
-            player_index: Some(sender_index),
-            message: message.into(),
-        };
-        self.add_global_message(chat, false, true);
-    }
-
-    pub fn add_server_chat_message(&mut self, message: impl Into<Cow<'static, str>>) {
-        let chat = HQMMessage::Chat {
-            player_index: None,
-            message: message.into(),
-        };
-        self.add_global_message(chat, false, true);
-    }
-
-    pub fn add_directed_chat_message(
-        &mut self,
-        message: impl Into<Cow<'static, str>>,
-        receiver_id: PlayerId,
-        sender_index: Option<PlayerIndex>,
-    ) {
-        if let Some(player) = self.players.get_player_mut(receiver_id) {
-            player.add_directed_chat_message(message, sender_index)
-        }
-    }
-
-    pub fn add_directed_user_chat_message(
-        &mut self,
-        message: impl Into<Cow<'static, str>>,
-        receiver_id: PlayerId,
-        sender_index: PlayerIndex,
-    ) {
-        self.add_directed_chat_message(message, receiver_id, Some(sender_index));
-    }
-
-    pub fn add_directed_server_chat_message(
-        &mut self,
-        message: impl Into<Cow<'static, str>>,
-        receiver_id: PlayerId,
-    ) {
-        self.add_directed_chat_message(message, receiver_id, None);
-    }
-
-    pub fn add_goal_message(
-        &mut self,
-        team: Team,
-        goal_player_index: Option<PlayerId>,
-        assist_player_index: Option<PlayerId>,
-    ) {
-        let goal_player_index = goal_player_index.and_then(|x| {
-            if self.players.get_player(x).is_some() {
-                Some(x.index)
-            } else {
-                None
-            }
-        });
-        let assist_player_index = assist_player_index.and_then(|x| {
-            if self.players.get_player(x).is_some() {
-                Some(x.index)
-            } else {
-                None
-            }
-        });
-        let message = HQMMessage::Goal {
-            team,
-            goal_player_index,
-            assist_player_index,
-        };
-        self.add_global_message(message, true, true);
-    }
-    fn add_global_message(&mut self, message: HQMMessage, persistent: bool, recording: bool) {
-        let rc = Rc::new(message);
-        if recording {
-            self.recording_messages.push(rc.clone());
-        }
-        if persistent {
-            self.persistent_messages.push(rc.clone());
-        }
-        for (_, player) in self.players.iter_players_mut() {
-            player.add_message(rc.clone());
-        }
-    }
-
-    fn add_user_team_message(&mut self, message: &str, sender_id: PlayerId) {
-        if let Some(player) = self.players.get_player(sender_id) {
-            let team = if let Some((_, _, team)) = player.object {
-                Some(team)
-            } else {
-                None
-            };
-            if let Some(team) = team {
-                info!(
-                    "{} ({}) to team {}: {}",
-                    &player.player_name, sender_id, team, message
-                );
-                let object = player
-                    .object
-                    .as_ref()
-                    .map(|(object_index, _, team)| (*object_index, *team));
-
-                let team_tag_name = match team {
-                    Team::Red => player.player_name_red.clone(),
-                    Team::Blue => player.player_name_blue.clone(),
-                };
-
-                let change1 = Rc::new(HQMMessage::PlayerUpdate {
-                    player_index: sender_id.index,
-                    data: Some(PlayerUpdateData {
-                        player_name: team_tag_name,
-                        object,
-                    }),
-                });
-                let change2 = Rc::new(HQMMessage::PlayerUpdate {
-                    player_index: sender_id.index,
-                    data: Some(PlayerUpdateData {
-                        player_name: player.player_name.clone(),
-                        object,
-                    }),
-                });
-                let chat = Rc::new(HQMMessage::Chat {
-                    player_index: Some(sender_id.index),
-                    message: Cow::Owned(message.to_owned()),
-                });
-
-                for (_, player) in self.players.iter_players_mut() {
-                    if player.team().is_some_and(|t| t == team) {
-                        player.add_message(change1.clone());
-                        player.add_message(chat.clone());
-                        player.add_message(change2.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn move_to_spectator(&mut self, player_id: PlayerId) -> bool {
-        if let Some(player) = self.players.get_player_mut(player_id) {
-            if player.object.is_some() {
-                player.object = None;
-                let update = player.get_update_message(player_id.index);
-                self.add_global_message(update, true, true);
-                return true;
-            }
-        }
-        false
-    }
-
-    pub(crate) fn spawn_skater(
-        &mut self,
-        player_index: PlayerId,
-        team: Team,
-        pos: Vec3,
-        rot: Rot3,
-        keep_stick_position: bool,
-    ) -> bool {
-        let empty_slot = self.find_empty_player_object_slot();
-        if let Some(player) = self.players.get_player_mut(player_index) {
-            if let Some((_, skater, team2)) = &mut player.object {
-                let mut new_skater = SkaterObject::new(pos, rot, player.preferred_hand);
-                if keep_stick_position {
-                    let stick_pos_diff = skater.stick_pos - skater.body.pos;
-                    let frame_change = rot * skater.body.rot.inverse();
-                    new_skater.stick_pos = pos + frame_change * stick_pos_diff;
-                    new_skater.stick_rot = frame_change * skater.stick_rot;
-                    new_skater.stick_placement = skater.stick_placement;
-                }
-                *skater = new_skater;
-                *team2 = team;
-                let update = player.get_update_message(player_index.index);
-                self.add_global_message(update, true, true);
-                return true;
-            } else {
-                let hand = player.preferred_hand;
-                if let Some(object_index) = empty_slot {
-                    let skater = SkaterObject::new(pos, rot, hand);
-
-                    player.object = Some((object_index, skater, team));
-
-                    if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
-                        data.view_player_index = player_index.index;
-                    }
-                    let update = player.get_update_message(player_index.index);
-                    self.add_global_message(update, true, true);
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn find_empty_player_object_slot(&self) -> Option<usize> {
-        let mut v = 0u64;
-        for object_index in self
-            .players
-            .iter_players()
-            .flat_map(|(_, player)| &player.object)
-            .map(|(object_index, _, _)| *object_index)
-        {
-            v |= 1 << object_index;
-        }
-        (self.puck_slots..32).find(|&i| (v >> i) & 1 == 0)
-    }
-
-    fn add_player(&mut self, player_name: &str, addr: SocketAddr) -> Option<PlayerId> {
-        if self.players.find_player_by_addr(addr).is_some() {
-            return None;
-        }
-        let player_index = find_empty_player_slot(&self.players);
-        match player_index {
-            Some(player_index) => {
-                let new_player = HQMServerPlayer::new_network_player(
-                    player_index,
-                    player_name,
-                    addr,
-                    &self.persistent_messages,
-                );
-                let update = new_player.get_update_message(player_index);
-
-                self.players[player_index.0].1 = Some(new_player);
-                let player_id = PlayerId {
-                    index: player_index,
-                    counter: self.players[player_index.0].0,
-                };
-
-                self.add_global_message(update, true, true);
-
-                Some(player_id)
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn add_bot(&mut self, player_name: &str) -> Option<PlayerId> {
-        let player_index = find_empty_player_slot(&self.players);
-        match player_index {
-            Some(player_index) => {
-                let new_player = HQMServerPlayer::new_bot(player_name);
-                let update = new_player.get_update_message(player_index);
-
-                self.players[player_index.0].1 = Some(new_player);
-                let player_id = PlayerId {
-                    index: player_index,
-                    counter: self.players[player_index.0].0,
-                };
-
-                self.add_global_message(update, true, true);
-
-                Some(player_id)
-            }
-            _ => None,
-        }
-    }
-
-    pub fn remove_player(&mut self, player_id: PlayerId, on_recording: bool) -> bool {
-        if self.players.get_player(player_id).is_some() {
-            let update = HQMMessage::PlayerUpdate {
-                player_index: player_id.index,
-                data: None,
-            };
-
-            self.players[player_id.index.0].0 += 1;
-            self.players[player_id.index.0].1 = None;
-
-            self.add_global_message(update, true, on_recording);
-
-            true
+    fn spawn_skater(&mut self, player_id: PlayerId, skater: SkaterObject) -> Option<usize> {
+        if let Some(object_index) = self.iter().position(|x| x.is_none()) {
+            self[object_index] = Some(GameObject::Skater(player_id, skater));
+            Some(object_index)
         } else {
-            false
+            None
         }
     }
 }
@@ -603,13 +154,13 @@ impl HQMTickHistory {
 }
 
 pub(crate) struct HQMServerState {
-    pub(crate) players: HQMServerPlayersAndMessages,
+    pub(crate) player_message_state: ServerPlayersAndMessages,
 
-    pub(crate) pucks: Vec<Option<Puck>>,
+    pub(crate) objects: Vec<Option<GameObject>>,
 
     pub(crate) replay: HQMTickHistory,
 
-    pub scoreboard: ScoreboardValues,
+    last_scoreboard: Option<ScoreboardValues>,
 
     packet: u32,
     recording_data: BytesMut,
@@ -622,14 +173,12 @@ pub(crate) struct HQMServerState {
 }
 
 impl HQMServerState {
-    pub(crate) fn new(puck_slots: usize, scoreboard: ScoreboardValues) -> Self {
-        let pucks = vec![None; puck_slots];
+    pub(crate) fn new() -> Self {
         Self {
-            players: HQMServerPlayersAndMessages::new(puck_slots),
-            pucks,
+            player_message_state: ServerPlayersAndMessages::new(),
+            objects: vec![None; 32],
             replay: HQMTickHistory::new(),
-
-            scoreboard,
+            last_scoreboard: None,
 
             recording_data: BytesMut::with_capacity(64 * 1024 * 1024),
             recording_msg_pos: 0,
@@ -642,8 +191,8 @@ impl HQMServerState {
         }
     }
 
-    fn new_game(&mut self, puck_slots: usize, scoreboard: ScoreboardValues) {
-        self.players.new_game(puck_slots);
+    fn new_game(&mut self) {
+        self.player_message_state.new_game();
 
         self.replay.clear();
 
@@ -655,22 +204,109 @@ impl HQMServerState {
 
         self.saved_pings.clear();
 
-        self.pucks = vec![None; puck_slots];
-        self.scoreboard = scoreboard;
+        self.objects = vec![None; 32];
+        self.last_scoreboard = None;
     }
-}
 
-fn find_empty_player_slot(players: &[ServerStatePlayerItem]) -> Option<PlayerIndex> {
-    players
-        .iter()
-        .position(|(_, x)| x.is_none())
-        .map(PlayerIndex)
+    pub fn set_hand(&mut self, hand: SkaterHand, player_id: PlayerId) {
+        if let Some(player) = self.player_message_state.players.get_player_mut(player_id) {
+            player.preferred_hand = hand;
+            if let Some((object_index, _)) = player.object {
+                if let Some(GameObject::Skater(_, ref mut skater)) = self.objects[object_index] {
+                    skater.hand = hand;
+                }
+            }
+        }
+    }
+    pub(crate) fn move_to_spectator(&mut self, player_id: PlayerId) -> bool {
+        if let Some(player) = self.player_message_state.players.get_player_mut(player_id) {
+            if let Some((object_index, _)) = player.object {
+                player.object = None;
+                self.objects[object_index] = None;
+                let update = player.get_update_message(player_id.index);
+                self.player_message_state
+                    .add_global_message(update, true, true);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn spawn_skater(
+        &mut self,
+        player_id: PlayerId,
+        team: Team,
+        pos: Vec3,
+        rot: Rot3,
+        keep_stick_position: bool,
+    ) -> bool {
+        if let Some(player) = self.player_message_state.players.get_player_mut(player_id) {
+            if let Some((object_index, ref mut team2)) = player.object {
+                if let Some(GameObject::Skater(_, ref mut skater)) = self.objects[object_index] {
+                    let mut new_skater = SkaterObject::new(pos, rot, player.preferred_hand);
+                    if keep_stick_position {
+                        let stick_pos_diff = skater.stick_pos - skater.body.pos;
+                        let frame_change = rot * skater.body.rot.inverse();
+                        new_skater.stick_pos = pos + frame_change * stick_pos_diff;
+                        new_skater.stick_rot = frame_change * skater.stick_rot;
+                        new_skater.stick_placement = skater.stick_placement;
+                        new_skater.stick_placement_delta = skater.stick_placement_delta;
+                    }
+                    *skater = new_skater;
+                    *team2 = team;
+                    let update = player.get_update_message(player_id.index);
+                    self.player_message_state
+                        .add_global_message(update, true, true);
+                    return true;
+                } else {
+                    unreachable!();
+                }
+            } else {
+                let hand = player.preferred_hand;
+
+                let skater = SkaterObject::new(pos, rot, hand);
+                if let Some(object_index) = self.objects.spawn_skater(player_id, skater) {
+                    player.object = Some((object_index, team));
+                    if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
+                        data.view_player_index = player_id.index;
+                    }
+                    let update = player.get_update_message(player_id.index);
+                    self.player_message_state
+                        .add_global_message(update, true, true);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn remove_player(&mut self, player_id: PlayerId, on_recording: bool) -> bool {
+        if let Some(player) = self.player_message_state.players.get_player(player_id) {
+            let update = HQMMessage::PlayerUpdate {
+                player_index: player_id.index,
+                data: None,
+            };
+            let object_index = player.object.map(|x| x.0);
+
+            self.player_message_state.players[player_id.index.0].0 += 1;
+            self.player_message_state.players[player_id.index.0].1 = None;
+            if let Some(object_index) = object_index {
+                self.objects[object_index] = None;
+            }
+
+            self.player_message_state
+                .add_global_message(update, true, on_recording);
+
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub(crate) struct HQMServer {
     pub(crate) state: HQMServerState,
 
-    pub(crate) allow_join: bool,
     pub config: ServerConfiguration,
 
     pub physics_config: PhysicsConfiguration,
@@ -688,16 +324,13 @@ pub(crate) struct HQMServer {
 
 impl HQMServer {
     pub(crate) fn new(
-        initial_values: InitialGameValues,
         config: ServerConfiguration,
         physics_config: PhysicsConfiguration,
         ban: Box<dyn BanCheck>,
         save_recording: Box<dyn RecordingSaveMethod>,
     ) -> Self {
         HQMServer {
-            state: HQMServerState::new(initial_values.puck_slots, initial_values.values),
-            allow_join: true,
-
+            state: HQMServerState::new(),
             physics_config,
             is_muted: false,
             config,
@@ -785,7 +418,7 @@ impl HQMServer {
 
     fn real_player_count(&self) -> usize {
         let mut player_count = 0;
-        for (_, player) in self.state.players.players.iter_players() {
+        for (_, player) in self.state.player_message_state.players.iter_players() {
             let is_actual_player = match player.data {
                 ServerPlayerData::NetworkPlayer { .. } => true,
                 ServerPlayerData::Bot { .. } => false,
@@ -809,7 +442,12 @@ impl HQMServer {
         client_version: HQMClientVersion,
         behaviour: &mut B,
     ) {
-        let (player_id, player) = match self.state.players.players.find_player_by_addr_mut(addr) {
+        let (player_id, player) = match self
+            .state
+            .player_message_state
+            .players
+            .find_player_by_addr_mut(addr)
+        {
             Some(x) => x,
             None => {
                 return;
@@ -872,18 +510,17 @@ impl HQMServer {
         if player_version != 55 {
             return; // Not the right version
         }
-        let current_slot = self.state.players.players.find_player_by_addr(addr);
+        let current_slot = self
+            .state
+            .player_message_state
+            .players
+            .find_player_by_addr(addr);
         if current_slot.is_some() {
             return; // Player has already joined
         }
 
         // Check ban list
         if self.ban.check_ip_banned(addr.ip()) != BanCheckResponse::Allowed {
-            return;
-        }
-
-        // Disabled join
-        if !self.allow_join {
             return;
         }
 
@@ -894,23 +531,7 @@ impl HQMServer {
                 name, player_index, addr
             );
             let msg = format!("{name} joined");
-            self.state.players.add_server_chat_message(msg);
-        }
-    }
-
-    pub fn set_hand(&mut self, hand: SkaterHand, player_id: PlayerId) {
-        if let Some(player) = self.state.players.players.get_player_mut(player_id) {
-            player.preferred_hand = hand;
-            if let Some((_, skater, _)) = &mut player.object {
-                if self.state.scoreboard.period != 0 {
-                    self.state.players.add_directed_server_chat_message(
-                        "Stick hand will change after next intermission",
-                        player_id,
-                    );
-                } else {
-                    skater.hand = hand;
-                }
-            }
+            self.state.player_message_state.add_server_chat_message(msg);
         }
     }
 
@@ -922,12 +543,6 @@ impl HQMServer {
         behaviour: &mut B,
     ) {
         match command {
-            "enablejoin" => {
-                self.set_allow_join(player_id, true);
-            }
-            "disablejoin" => {
-                self.set_allow_join(player_id, false);
-            }
             "mute" => {
                 if let Ok(mute_player_index) = arg.parse::<PlayerIndex>() {
                     self.mute_player(player_id, mute_player_index);
@@ -972,10 +587,10 @@ impl HQMServer {
             }
             "replay" | "record" => self.set_recording(player_id, arg),
             "lefty" => {
-                self.set_hand(SkaterHand::Left, player_id);
+                self.state.set_hand(SkaterHand::Left, player_id);
             }
             "righty" => {
-                self.set_hand(SkaterHand::Right, player_id);
+                self.state.set_hand(SkaterHand::Right, player_id);
             }
             "admin" => {
                 self.admin_login(player_id, arg);
@@ -1005,17 +620,19 @@ impl HQMServer {
                     let matches = self.player_search(arg);
                     if matches.is_empty() {
                         self.state
-                            .players
+                            .player_message_state
                             .add_directed_server_chat_message("No matches found", player_id);
                     } else if matches.len() > 1 {
-                        self.state.players.add_directed_server_chat_message(
-                            "Multiple matches found, use /ping X",
-                            player_id,
-                        );
+                        self.state
+                            .player_message_state
+                            .add_directed_server_chat_message(
+                                "Multiple matches found, use /ping X",
+                                player_id,
+                            );
                         for (found_player_id, found_player_name) in matches.into_iter().take(5) {
                             let msg = format!("{}: {}", found_player_id.index, found_player_name);
                             self.state
-                                .players
+                                .player_message_state
                                 .add_directed_server_chat_message(msg, player_id);
                         }
                     } else {
@@ -1035,17 +652,19 @@ impl HQMServer {
                     let matches = self.player_search(arg);
                     if matches.is_empty() {
                         self.state
-                            .players
+                            .player_message_state
                             .add_directed_server_chat_message("No matches found", player_id);
                     } else if matches.len() > 1 {
-                        self.state.players.add_directed_server_chat_message(
-                            "Multiple matches found, use /view X",
-                            player_id,
-                        );
+                        self.state
+                            .player_message_state
+                            .add_directed_server_chat_message(
+                                "Multiple matches found, use /view X",
+                                player_id,
+                            );
                         for (found_player_id, found_player_name) in matches.into_iter().take(5) {
                             let str = format!("{}: {}", found_player_id.index, found_player_name);
                             self.state
-                                .players
+                                .player_message_state
                                 .add_directed_server_chat_message(str, player_id);
                         }
                     } else {
@@ -1054,27 +673,36 @@ impl HQMServer {
                 }
             }
             "restoreview" => {
-                if let Some(player) = self.state.players.players.get_player_mut(player_id) {
+                if let Some(player) = self
+                    .state
+                    .player_message_state
+                    .players
+                    .get_player_mut(player_id)
+                {
                     if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
                         if data.view_player_index != player_id.index {
                             data.view_player_index = player_id.index;
-                            self.state.players.add_directed_server_chat_message(
-                                "View has been restored",
-                                player_id,
-                            );
+                            self.state
+                                .player_message_state
+                                .add_directed_server_chat_message(
+                                    "View has been restored",
+                                    player_id,
+                                );
                         }
                     }
                 }
             }
             "t" => {
-                self.state.players.add_user_team_message(arg, player_id);
+                self.state
+                    .player_message_state
+                    .add_user_team_message(arg, player_id);
             }
             "version" => {
                 let version = env!("CARGO_PKG_VERSION");
                 let s = format!("Migo HQM Server, version {version}");
 
                 self.state
-                    .players
+                    .player_message_state
                     .add_directed_server_chat_message(s, player_id);
             }
             "git" => {
@@ -1085,7 +713,7 @@ impl HQMServer {
                     "No git commit ID found".into()
                 };
                 self.state
-                    .players
+                    .player_message_state
                     .add_directed_server_chat_message(s, player_id);
             }
 
@@ -1096,7 +724,7 @@ impl HQMServer {
     fn list_players(&mut self, receiver_id: PlayerId, first_index: usize) {
         let res: Vec<_> = self
             .state
-            .players
+            .player_message_state
             .players
             .iter_players()
             .filter(|(x, _)| x.index.0 >= first_index)
@@ -1105,7 +733,7 @@ impl HQMServer {
             .collect();
         for msg in res {
             self.state
-                .players
+                .player_message_state
                 .add_directed_server_chat_message(msg, receiver_id);
         }
     }
@@ -1114,14 +742,14 @@ impl HQMServer {
         let matches = self.player_search(name);
         if matches.is_empty() {
             self.state
-                .players
+                .player_message_state
                 .add_directed_server_chat_message("No matches found", player_id);
             return;
         }
         for (found_player_id, found_player_name) in matches.into_iter().take(5) {
             let msg = format!("{}: {}", found_player_id.index, found_player_name);
             self.state
-                .players
+                .player_message_state
                 .add_directed_server_chat_message(msg, player_id);
         }
     }
@@ -1129,38 +757,47 @@ impl HQMServer {
     fn view(&mut self, view_player_index: PlayerIndex, player_id: PlayerId) {
         if let Some((view_player_id, view_player)) = self
             .state
-            .players
+            .player_message_state
             .players
             .get_player_by_index(view_player_index)
         {
             let view_player_name = view_player.player_name.clone();
 
-            if let Some(player) = self.state.players.players.get_player_mut(player_id) {
+            if let Some(player) = self
+                .state
+                .player_message_state
+                .players
+                .get_player_mut(player_id)
+            {
                 if let ServerPlayerData::NetworkPlayer { data } = &mut player.data {
                     if player.object.is_some() {
-                        self.state.players.add_directed_server_chat_message(
-                            "You must be a spectator to change view",
-                            player_id,
-                        );
+                        self.state
+                            .player_message_state
+                            .add_directed_server_chat_message(
+                                "You must be a spectator to change view",
+                                player_id,
+                            );
                     } else if view_player_index != data.view_player_index {
                         data.view_player_index = view_player_id.index;
                         if player_id != view_player_id {
                             let msg = format!("You are now viewing {view_player_name}");
                             self.state
-                                .players
+                                .player_message_state
                                 .add_directed_server_chat_message(msg, player_id);
                         } else {
-                            self.state.players.add_directed_server_chat_message(
-                                "View has been restored",
-                                player_id,
-                            );
+                            self.state
+                                .player_message_state
+                                .add_directed_server_chat_message(
+                                    "View has been restored",
+                                    player_id,
+                                );
                         }
                     }
                 }
             }
         } else {
             self.state
-                .players
+                .player_message_state
                 .add_directed_server_chat_message("No player with this ID exists", player_id);
         }
     }
@@ -1168,7 +805,7 @@ impl HQMServer {
     fn ping(&mut self, ping_player_index: PlayerIndex, player_id: PlayerId) {
         if let Some((_, ping_player)) = self
             .state
-            .players
+            .player_message_state
             .players
             .get_player_by_index(ping_player_index)
         {
@@ -1185,27 +822,29 @@ impl HQMServer {
                     (ping.deviation * 1000f32)
                 );
                 self.state
-                    .players
+                    .player_message_state
                     .add_directed_server_chat_message(msg1, player_id);
                 self.state
-                    .players
+                    .player_message_state
                     .add_directed_server_chat_message(msg2, player_id);
             } else {
-                self.state.players.add_directed_server_chat_message(
-                    "This player is not a connected player",
-                    player_id,
-                );
+                self.state
+                    .player_message_state
+                    .add_directed_server_chat_message(
+                        "This player is not a connected player",
+                        player_id,
+                    );
             }
         } else {
             self.state
-                .players
+                .player_message_state
                 .add_directed_server_chat_message("No player with this ID exists", player_id);
         }
     }
 
     pub fn player_exact_unique_match(&self, name: &str) -> Option<(PlayerId, Rc<str>)> {
         let mut found = None;
-        for (player_id, player) in self.state.players.players.iter_players() {
+        for (player_id, player) in self.state.player_message_state.players.iter_players() {
             if player.player_name.as_ref() == name {
                 if found.is_none() {
                     found = Some((player_id, player.player_name.clone()));
@@ -1220,7 +859,7 @@ impl HQMServer {
     pub fn player_search(&self, name: &str) -> Vec<(PlayerId, Rc<str>)> {
         let name = name.to_lowercase();
         let mut found = Vec::new();
-        for (player_index, player) in self.state.players.players.iter_players() {
+        for (player_index, player) in self.state.player_message_state.players.iter_players() {
             if player.player_name.to_lowercase().contains(&name) {
                 found.push((player_index, player.player_name.clone()));
                 if found.len() >= 5 {
@@ -1237,7 +876,12 @@ impl HQMServer {
         player_id: PlayerId,
         behaviour: &mut B,
     ) {
-        if let Some(player) = self.state.players.players.get_player(player_id) {
+        if let Some(player) = self
+            .state
+            .player_message_state
+            .players
+            .get_player(player_id)
+        {
             if msg.starts_with("/") {
                 let split: Vec<&str> = msg.splitn(2, " ").collect();
                 let command = &split[0][1..];
@@ -1248,15 +892,13 @@ impl HQMServer {
                     MuteStatus::NotMuted => {
                         info!("{} ({}): {}", &player.player_name, player_id, &msg);
                         self.state
-                            .players
+                            .player_message_state
                             .add_user_chat_message(msg, player_id.index);
                     }
                     MuteStatus::ShadowMuted => {
-                        self.state.players.add_directed_user_chat_message(
-                            msg,
-                            player_id,
-                            player_id.index,
-                        );
+                        self.state
+                            .player_message_state
+                            .add_directed_user_chat_message(msg, player_id, player_id.index);
                     }
                     MuteStatus::Muted => {}
                 }
@@ -1265,56 +907,47 @@ impl HQMServer {
     }
 
     fn player_exit<B: GameMode>(&mut self, addr: SocketAddr, behaviour: &mut B) {
-        let player = self.state.players.players.find_player_by_addr(addr);
+        let player = self
+            .state
+            .player_message_state
+            .players
+            .find_player_by_addr(addr);
 
         if let Some((player_id, player)) = player {
             let player_name = player.player_name.clone();
             behaviour.before_player_exit(self.into(), player_id, ExitReason::Disconnected);
-            self.remove_player(player_id, true);
+            self.state.remove_player(player_id, true);
             info!("{} ({}) exited server", player_name, player_id);
             let msg = format!("{player_name} exited");
-            self.state.players.add_server_chat_message(msg);
+            self.state.player_message_state.add_server_chat_message(msg);
         }
     }
 
     fn add_player(&mut self, player_name: &str, addr: SocketAddr) -> Option<PlayerId> {
-        let res = self.state.players.add_player(player_name, addr);
+        let res = self
+            .state
+            .player_message_state
+            .add_player(player_name, addr);
         if let Some(player_index) = res {
             let welcome = self.config.welcome.clone();
             for welcome_msg in welcome {
                 self.state
-                    .players
+                    .player_message_state
                     .add_directed_server_chat_message(welcome_msg, player_index);
             }
         }
         res
     }
 
-    pub fn remove_player(&mut self, player_id: PlayerId, on_recording: bool) -> bool {
-        let res = self.state.players.remove_player(player_id, on_recording);
-        if res {
-            let admin_found = self
-                .state
-                .players
-                .players
-                .iter_players()
-                .any(|(_, x)| x.is_admin);
-
-            if !admin_found {
-                self.allow_join = true;
-            }
-        }
-        res
-    }
-
-    fn game_step<B: GameMode>(&mut self, behaviour: &mut B) {
+    fn game_step<B: GameMode>(&mut self, behaviour: &mut B) -> ScoreboardValues {
         self.state.replay.game_step = self.state.replay.game_step.wrapping_add(1);
 
         let events = self.simulate_step();
 
         let packets = self.get_packets();
 
-        behaviour.after_tick(self.into(), &events);
+        let scoreboard = behaviour.after_tick(self.into(), &events);
+        self.state.last_scoreboard = Some(scoreboard);
 
         if self.state.replay.history_length > 0 {
             let new_replay_tick = ReplayTick {
@@ -1336,21 +969,19 @@ impl HQMServer {
         if self.config.recording_enabled != ReplayRecording::Off
             && behaviour.include_tick_in_recording((&*self).into())
         {
-            self.write_recording_tick();
+            self.write_recording_tick(&scoreboard);
         }
+        scoreboard
     }
 
     fn get_packets(&self) -> [ObjectPacket; 32] {
         let mut packets = [const { ObjectPacket::None }; 32];
-        for (i, puck) in self.state.pucks.iter().enumerate() {
-            if let Some(puck) = puck {
-                packets[i] = ObjectPacket::Puck(puck.get_packet())
-            }
-        }
-        for (_, player) in self.state.players.players.iter_players() {
-            if let Some((object_index, ref skater, _)) = player.object {
-                packets[object_index] = ObjectPacket::Skater(skater.get_packet());
-            }
+        for (i, object) in self.state.objects.iter().enumerate() {
+            packets[i] = match object {
+                None => ObjectPacket::None,
+                Some(GameObject::Skater(_, skater)) => ObjectPacket::Skater(skater.get_packet()),
+                Some(GameObject::Puck(puck)) => ObjectPacket::Puck(puck.get_packet()),
+            };
         }
 
         packets
@@ -1359,7 +990,7 @@ impl HQMServer {
     fn remove_inactive_players<B: GameMode>(&mut self, behaviour: &mut B) {
         let inactive_players: smallvec::SmallVec<[_; 8]> = self
             .state
-            .players
+            .player_message_state
             .players
             .iter_players_mut()
             .filter_map(|(player_id, player)| {
@@ -1377,10 +1008,12 @@ impl HQMServer {
             .collect();
         for (player_id, player_name) in inactive_players {
             behaviour.before_player_exit(self.into(), player_id, ExitReason::Timeout);
-            self.remove_player(player_id, true);
+            self.state.remove_player(player_id, true);
             info!("{} ({}) timed out", player_name, player_id);
             let chat_msg = format!("{player_name} timed out");
-            self.state.players.add_server_chat_message(chat_msg);
+            self.state
+                .player_message_state
+                .add_server_chat_message(chat_msg);
         }
     }
 
@@ -1398,7 +1031,7 @@ impl HQMServer {
                 info!("New game {} started", self.game_id);
             }
 
-            let (game_step, forced_view) = tokio::task::block_in_place(|| {
+            let (game_step, forced_view, scoreboard) = tokio::task::block_in_place(|| {
                 self.remove_inactive_players(behaviour);
 
                 behaviour.before_tick(self.into());
@@ -1409,14 +1042,15 @@ impl HQMServer {
                     let forced_view = forced_view.map(|x| x.index);
                     let game_step = tick.game_step;
                     let packets = tick.packets;
+                    let scoreboard = self.state.last_scoreboard.unwrap_or_default();
 
                     self.state.saved_packets.push_front(packets);
 
                     self.state.packet = self.state.packet.wrapping_add(1);
-                    (game_step, forced_view)
+                    (game_step, forced_view, scoreboard)
                 } else {
-                    self.game_step(behaviour);
-                    (self.state.replay.game_step, None)
+                    let scoreboard = self.game_step(behaviour);
+                    (self.state.replay.game_step, None, scoreboard)
                 };
 
                 self.state.saved_pings.push_front(Instant::now());
@@ -1428,9 +1062,9 @@ impl HQMServer {
                 self.game_id,
                 &self.state.saved_packets,
                 game_step,
-                &self.state.scoreboard,
+                &scoreboard,
                 self.state.packet,
-                &self.state.players.players,
+                &self.state.player_message_state.players,
                 socket,
                 forced_view,
                 write_buf,
@@ -1438,8 +1072,7 @@ impl HQMServer {
             .await;
         } else if self.has_current_game_been_active {
             info!("Game {} abandoned", self.game_id);
-            self.new_game(behaviour.get_initial_game_values());
-            self.allow_join = true;
+            self.new_game();
         }
     }
 
@@ -1453,7 +1086,7 @@ impl HQMServer {
         self.save_recording
             .save_recording_data(&self.config, recording_data, self.start_time);
     }
-    pub fn new_game(&mut self, v: InitialGameValues) {
+    pub fn new_game(&mut self) {
         self.game_id += 1;
 
         self.has_current_game_been_active = false;
@@ -1464,12 +1097,12 @@ impl HQMServer {
             self.save_recording(&old_recording_data);
         }
 
-        self.state.new_game(v.puck_slots, v.values);
+        self.state.new_game();
     }
 
-    fn write_recording_tick(&mut self) {
+    fn write_recording_tick(&mut self, scoreboard: &ScoreboardValues) {
         let messages_to_write =
-            &self.state.players.recording_messages[self.state.recording_msg_pos..];
+            &self.state.player_message_state.recording_messages[self.state.recording_msg_pos..];
         let remaining_messages = messages_to_write.len();
         self.state.recording_data.reserve(
             9 // Header, time, score, period, etc.
@@ -1483,17 +1116,17 @@ impl HQMServer {
         writer.write_byte_aligned(5);
         writer.write_bits(
             1,
-            match self.state.scoreboard.game_over {
+            match scoreboard.game_over {
                 true => 1,
                 false => 0,
             },
         );
-        writer.write_bits(8, self.state.scoreboard.red_score);
-        writer.write_bits(8, self.state.scoreboard.blue_score);
-        writer.write_bits(16, self.state.scoreboard.time);
+        writer.write_bits(8, scoreboard.red_score);
+        writer.write_bits(8, scoreboard.blue_score);
+        writer.write_bits(16, scoreboard.time);
 
-        writer.write_bits(16, self.state.scoreboard.goal_message_timer);
-        writer.write_bits(8, self.state.scoreboard.period); // 8.1
+        writer.write_bits(16, scoreboard.goal_message_timer);
+        writer.write_bits(8, scoreboard.period); // 8.1
 
         let packets = &self.state.saved_packets;
 
@@ -1511,7 +1144,7 @@ impl HQMServer {
         for message in messages_to_write {
             write_message(&mut writer, Rc::as_ref(message));
         }
-        self.state.recording_msg_pos = self.state.players.recording_messages.len();
+        self.state.recording_msg_pos = self.state.player_message_state.recording_messages.len();
         writer.recording_fix();
     }
 }
@@ -1528,7 +1161,7 @@ async fn send_updates(
     game_step: u32,
     value: &ScoreboardValues,
     current_packet: u32,
-    players: &[ServerStatePlayerItem],
+    players: &[(u32, Option<ServerPlayer>)],
     socket: &UdpSocket,
     force_view: Option<PlayerIndex>,
     write_buf: &mut BytesMut,
@@ -1615,202 +1248,6 @@ async fn send_updates(
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub enum MuteStatus {
-    NotMuted,
-    ShadowMuted,
-    Muted,
-}
-
-pub(crate) struct NetworkPlayerData {
-    pub addr: SocketAddr,
-    pub(crate) client_version: HQMClientVersion,
-    inactivity: u32,
-    pub(crate) known_packet: u32,
-    pub(crate) known_msgpos: usize,
-    chat_rep: Option<u8>,
-    pub(crate) deltatime: u32,
-    last_ping: Box<ArrayDeque<f32, 100, Wrapping>>,
-    pub(crate) view_player_index: PlayerIndex,
-    pub game_id: u32,
-    pub(crate) messages: Vec<Rc<HQMMessage>>,
-}
-
-pub(crate) enum ServerPlayerData {
-    NetworkPlayer { data: NetworkPlayerData },
-    Bot {},
-}
-
-pub(crate) struct HQMServerPlayer {
-    pub player_name: Rc<str>,
-    player_name_red: Rc<str>,
-    player_name_blue: Rc<str>,
-    pub(crate) object: Option<(usize, SkaterObject, Team)>,
-    pub data: ServerPlayerData,
-    pub is_admin: bool,
-    pub is_muted: MuteStatus,
-    pub preferred_hand: SkaterHand,
-    pub input: PlayerInput,
-}
-
-impl HQMServerPlayer {
-    pub fn new_network_player(
-        player_index: PlayerIndex,
-        player_name: &str,
-        addr: SocketAddr,
-        global_messages: &[Rc<HQMMessage>],
-    ) -> Self {
-        HQMServerPlayer {
-            player_name: player_name.into(),
-            player_name_red: format!("[Red] {player_name}").into(),
-            player_name_blue: format!("[Blue] {player_name}").into(),
-            object: None,
-            data: ServerPlayerData::NetworkPlayer {
-                data: NetworkPlayerData {
-                    addr,
-                    client_version: HQMClientVersion::Vanilla,
-                    inactivity: 0,
-                    known_packet: u32::MAX,
-                    known_msgpos: 0,
-                    chat_rep: None,
-                    // store latest deltime client sends you to respond with it
-                    deltatime: 0,
-                    last_ping: Box::new(ArrayDeque::new()),
-                    view_player_index: player_index,
-                    game_id: u32::MAX,
-                    messages: global_messages.to_vec(),
-                },
-            },
-            is_admin: false,
-            input: Default::default(),
-            is_muted: MuteStatus::NotMuted,
-            preferred_hand: SkaterHand::Right,
-        }
-    }
-
-    pub fn new_bot(player_name: &str) -> Self {
-        HQMServerPlayer {
-            player_name: player_name.into(),
-            player_name_red: format!("[Red] {player_name}").into(),
-            player_name_blue: format!("[Blue] {player_name}").into(),
-            object: None,
-            data: ServerPlayerData::Bot {},
-            is_admin: false,
-            input: Default::default(),
-            is_muted: MuteStatus::NotMuted,
-            preferred_hand: SkaterHand::Right,
-        }
-    }
-
-    fn reset(&mut self, player_index: PlayerIndex) {
-        self.object = None;
-        if let ServerPlayerData::NetworkPlayer { data } = &mut self.data {
-            data.known_msgpos = 0;
-            data.known_packet = u32::MAX;
-            data.messages.clear();
-            data.view_player_index = player_index;
-        }
-    }
-
-    fn get_update_message(&self, player_index: PlayerIndex) -> HQMMessage {
-        HQMMessage::PlayerUpdate {
-            player_index,
-            data: Some(PlayerUpdateData {
-                player_name: self.player_name.clone(),
-                object: self
-                    .object
-                    .as_ref()
-                    .map(|(object_index, _, team)| (*object_index, *team)),
-            }),
-        }
-    }
-
-    fn add_message(&mut self, message: Rc<HQMMessage>) {
-        if let ServerPlayerData::NetworkPlayer {
-            data: NetworkPlayerData { messages, .. },
-        } = &mut self.data
-        {
-            messages.push(message);
-        }
-    }
-
-    fn ping_data(&self) -> Option<PingData> {
-        match self.data {
-            ServerPlayerData::NetworkPlayer {
-                data: NetworkPlayerData { ref last_ping, .. },
-            } => {
-                let n = last_ping.len() as f32;
-                let mut min = f32::INFINITY;
-                let mut max = f32::NEG_INFINITY;
-                let mut sum = 0f32;
-                for i in last_ping.iter() {
-                    min = min.min(*i);
-                    max = max.max(*i);
-                    sum += *i;
-                }
-                let avg = sum / n;
-                let dev = {
-                    let mut s = 0f32;
-                    for i in last_ping.iter() {
-                        s += (*i - avg).powi(2);
-                    }
-                    (s / n).sqrt()
-                };
-                Some(PingData {
-                    min,
-                    max,
-                    avg,
-                    deviation: dev,
-                })
-            }
-            ServerPlayerData::Bot { .. } => None,
-        }
-    }
-
-    pub(crate) fn add_directed_user_chat_message(
-        &mut self,
-        message: impl Into<Cow<'static, str>>,
-        sender_index: PlayerIndex,
-    ) {
-        self.add_directed_chat_message(message, Some(sender_index));
-    }
-
-    pub(crate) fn add_directed_server_chat_message(
-        &mut self,
-        message: impl Into<Cow<'static, str>>,
-    ) {
-        self.add_directed_chat_message(message, None);
-    }
-
-    pub(crate) fn add_directed_chat_message(
-        &mut self,
-        message: impl Into<Cow<'static, str>>,
-        sender_index: Option<PlayerIndex>,
-    ) {
-        let chat = HQMMessage::Chat {
-            player_index: sender_index,
-            message: message.into(),
-        };
-        self.add_message(Rc::new(chat));
-    }
-
-    pub fn team(&self) -> Option<Team> {
-        self.object.as_ref().map(|x| x.2)
-    }
-
-    pub fn has_skater(&self) -> bool {
-        self.object.is_some()
-    }
-}
-
-#[derive(Copy, Clone)]
-struct PingData {
-    pub min: f32,
-    pub max: f32,
-    pub avg: f32,
-    pub deviation: f32,
-}
-
 /// Starts an HQM server. This method will not return until the server has terminated.
 pub async fn run_server<B: GameMode>(
     port: u16,
@@ -1821,11 +1258,9 @@ pub async fn run_server<B: GameMode>(
     recording: Box<dyn RecordingSaveMethod>,
     mut behaviour: B,
 ) -> std::io::Result<()> {
-    let initial_values = behaviour.get_initial_game_values();
-
     let reqwest_client = reqwest::Client::new();
 
-    let mut server = HQMServer::new(initial_values, config, physics_config, ban, recording);
+    let mut server = HQMServer::new(config, physics_config, ban, recording);
     info!("Server started");
 
     behaviour.init((&mut server).into());

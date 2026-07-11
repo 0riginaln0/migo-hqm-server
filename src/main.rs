@@ -7,8 +7,7 @@ use std::env;
 use ini::Properties;
 use migo_hqm_server::ban::{BanCheck, FileBanCheck, InMemoryBanCheck};
 use migo_hqm_server::game::PhysicsConfiguration;
-use migo_hqm_server::gamemode::russian::RussianGameMode;
-use migo_hqm_server::gamemode::shootout::ShootoutGameMode;
+use migo_hqm_server::gamemode::shootout::{ShootoutGameConfiguration, ShootoutGameMode};
 use migo_hqm_server::gamemode::standard_match::{
     IcingConfiguration, MatchConfiguration, OffsideConfiguration, OffsideLineConfiguration,
     StandardMatchGameMode, TwoLinePassConfiguration,
@@ -23,7 +22,6 @@ use migo_hqm_server::{ReplayRecording, ServerConfiguration};
 enum HQMServerMode {
     Match,
     PermanentWarmup,
-    Russian,
     Shootout,
 }
 
@@ -81,7 +79,6 @@ async fn main() -> anyhow::Result<()> {
             .map_or(HQMServerMode::Match, |x| match x {
                 "warmup" => HQMServerMode::PermanentWarmup,
                 "match" => HQMServerMode::Match,
-                "russian" => HQMServerMode::Russian,
                 "shootout" => HQMServerMode::Shootout,
                 _ => HQMServerMode::Match,
             });
@@ -365,24 +362,10 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?
             }
-            HQMServerMode::Russian => {
-                let attempts =
-                    get_optional(game_section, "attempts", 10, |x| x.parse::<u32>().unwrap());
-
-                migo_hqm_server::run_server(
-                    server_port,
-                    public_address,
-                    config,
-                    physics_config,
-                    ban,
-                    replay_saving,
-                    RussianGameMode::new(attempts, server_team_max),
-                )
-                .await?
-            }
             HQMServerMode::Shootout => {
                 let attempts =
                     get_optional(game_section, "attempts", 5, |x| x.parse::<u32>().unwrap());
+                let shootout_config = ShootoutGameConfiguration { attempts };
 
                 migo_hqm_server::run_server(
                     server_port,
@@ -391,7 +374,7 @@ async fn main() -> anyhow::Result<()> {
                     physics_config,
                     ban,
                     replay_saving,
-                    ShootoutGameMode::new(attempts),
+                    ShootoutGameMode::new(shootout_config),
                 )
                 .await?;
             }

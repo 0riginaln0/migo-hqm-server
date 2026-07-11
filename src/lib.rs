@@ -5,6 +5,7 @@ pub mod gamemode;
 pub mod ban;
 pub mod game;
 pub mod physics;
+mod players;
 mod protocol;
 pub mod record;
 mod server;

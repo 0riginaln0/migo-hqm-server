@@ -1,6 +1,7 @@
 use crate::protocol;
 
 use crate::game::RinkSideOfLine::{BlueSide, On, RedSide};
+use crate::game::RulesState::Regular;
 use crate::protocol::{PuckPacket, SkaterPacket};
 use glam::{Vec2, Vec3};
 use glamx::Rot3;
@@ -620,6 +621,15 @@ pub enum RulesState {
     },
     Offside,
     Icing,
+}
+
+impl Default for RulesState {
+    fn default() -> Self {
+        Regular {
+            offside_warning: false,
+            icing_warning: false,
+        }
+    }
 }
 
 fn get_position(bits: u32, v: f32) -> u32 {

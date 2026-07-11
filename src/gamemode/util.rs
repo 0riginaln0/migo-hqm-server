@@ -1,5 +1,5 @@
 use crate::game::{PlayerId, Rink, Team};
-use crate::gamemode::ServerPlayersMut;
+use crate::gamemode::ServerStateMut;
 use glam::Vec3;
 use glamx::Rot3;
 use smallvec::SmallVec;
@@ -13,7 +13,7 @@ pub fn add_players<
     FSpectate: FnMut(PlayerId),
     FJoin: FnMut(PlayerId, Team),
 >(
-    mut server: ServerPlayersMut,
+    mut server: ServerStateMut,
     team_max: usize,
     team_switch_timer: &mut HashMap<PlayerId, u32>,
     show_extra_messages: Option<&HashSet<PlayerId>>,
@@ -26,7 +26,7 @@ pub fn add_players<
     let mut spectating_players = SmallVec::<[_; 32]>::new();
     let mut joining_red = SmallVec::<[_; 32]>::new();
     let mut joining_blue = SmallVec::<[_; 32]>::new();
-    for player in server.iter() {
+    for player in server.players().iter() {
         let player_id = player.id;
         let input = player.input();
         let team = player.team();
@@ -59,7 +59,9 @@ pub fn add_players<
         if let Some(show_extra_messages) = show_extra_messages {
             let s = format!("{player_name} is spectating");
             for i in show_extra_messages.iter() {
-                server.add_directed_server_chat_message(s.clone(), *i);
+                server
+                    .players_mut()
+                    .add_directed_server_chat_message(s.clone(), *i);
             }
         }
     }
@@ -82,7 +84,9 @@ pub fn add_players<
                     if let Some(show_extra_messages) = show_extra_messages {
                         let s = format!("{player_name} is playing for Red");
                         for msg_player_id in show_extra_messages.iter() {
-                            server.add_directed_server_chat_message(s.clone(), *msg_player_id);
+                            server
+                                .players_mut()
+                                .add_directed_server_chat_message(s.clone(), *msg_player_id);
                         }
                     }
                 } else {
