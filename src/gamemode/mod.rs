@@ -361,11 +361,11 @@ impl<'a> ServerReplayMut<'a> {
     }
 
     pub fn set_history_length(&mut self, history_length: usize) {
-        self.replay.history_length = history_length;
+        self.replay.set_history_capacity(history_length);
     }
 
     pub fn game_step(&self) -> u32 {
-        self.replay.game_step
+        self.replay.game_step()
     }
 }
 
@@ -380,7 +380,7 @@ impl<'a> ServerReplay<'a> {
     }
 
     pub fn game_step(&self) -> u32 {
-        self.replay.game_step
+        self.replay.game_step()
     }
 }
 

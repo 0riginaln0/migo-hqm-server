@@ -1,5 +1,5 @@
 use crate::game::{PlayerId, PlayerIndex, PlayerInput, SkaterHand, Team};
-use crate::server::{HQMClientVersion, ObjectSlot};
+use crate::server::{HQMClientVersion, ObjectSlot, PacketNumber};
 use arraydeque::ArrayDeque;
 use arraydeque::behavior::Wrapping;
 use std::borrow::Cow;
@@ -410,7 +410,7 @@ pub(crate) struct NetworkPlayerData {
     pub addr: SocketAddr,
     pub client_version: HQMClientVersion,
     pub(crate) inactivity: u32,
-    pub known_packet: u32,
+    pub known_packet: Option<PacketNumber>,
     pub known_msgpos: usize,
     pub(crate) chat_rep: Option<u8>,
     pub deltatime: u32,
@@ -454,7 +454,7 @@ impl ServerPlayer {
                     addr,
                     client_version: HQMClientVersion::Vanilla,
                     inactivity: 0,
-                    known_packet: u32::MAX,
+                    known_packet: None,
                     known_msgpos: 0,
                     chat_rep: None,
                     // store latest deltime client sends you to respond with it
@@ -490,7 +490,7 @@ impl ServerPlayer {
         self.object = None;
         if let ServerPlayerData::NetworkPlayer { data } = &mut self.data {
             data.known_msgpos = 0;
-            data.known_packet = u32::MAX;
+            data.known_packet = None;
             data.messages.clear();
             data.view_player_index = player_index;
         }

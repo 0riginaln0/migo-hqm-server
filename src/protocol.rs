@@ -1,6 +1,5 @@
 use crate::game::PlayerInput;
-use crate::server::{HQMClientVersion, HQMMessage};
-use arraydeque::{ArrayDeque, Wrapping};
+use crate::server::{HQMClientVersion, HQMMessage, PacketHistory, PacketNumber};
 use bytes::{BufMut, BytesMut};
 
 use glam::{Vec2, Vec3};
@@ -603,32 +602,14 @@ pub(crate) fn write_message(writer: &mut HQMMessageWriter, message: &HQMMessage)
 
 pub(crate) fn write_objects(
     writer: &mut HQMMessageWriter,
-    packets: &ArrayDeque<[ObjectPacket; 32], 192, Wrapping>,
-    current_packet: u32,
-    known_packet: u32,
+    history: &PacketHistory,
+    known_packet: Option<PacketNumber>,
 ) {
-    let current_packets = packets[0].as_slice();
+    let current_packets = history.current_objects();
+    let old_packets = known_packet.and_then(|packet| history.baseline_objects_for(packet));
 
-    let old_packets = {
-        let diff = if known_packet == u32::MAX {
-            None
-        } else {
-            current_packet.checked_sub(known_packet)
-        };
-        if let Some(diff) = diff {
-            let index = diff as usize;
-            if index < 192 && index > 0 {
-                packets.get(index)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-
-    writer.write_u32_aligned(current_packet);
-    writer.write_u32_aligned(known_packet);
+    writer.write_u32_aligned(history.latest_sequence().to_wire());
+    writer.write_u32_aligned(known_packet.map_or(u32::MAX, PacketNumber::to_wire));
 
     for i in 0..32 {
         let current_packet = &current_packets[i];
