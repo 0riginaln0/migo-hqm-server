@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::cmp::min;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
@@ -28,6 +27,7 @@ use crate::game::{
     PhysicsConfiguration, PlayerId, PlayerIndex, PlayerInput, Puck, Rink, RulesState,
     ScoreboardValues, SkaterHand, SkaterObject, Team,
 };
+use crate::players::NetworkPlayerData;
 pub(crate) use crate::players::{
     HQMMessage, MuteStatus, PlayerListExt, ServerPlayer, ServerPlayerData, ServerPlayersAndMessages,
 };
@@ -39,6 +39,10 @@ use crate::record::RecordingSaveMethod;
 use crate::{ReplayRecording, ServerConfiguration};
 
 pub(crate) const GAME_HEADER: &[u8] = b"Hock";
+
+const UPDATE_PACKET_TYPE: u8 = 5;
+const NEW_GAME_PACKET_TYPE: u8 = 6;
+const MAX_MESSAGES_PER_UPDATE: usize = 15;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum HQMClientVersion {
@@ -542,137 +546,60 @@ impl HQMServer {
         player_id: PlayerId,
         behaviour: &mut B,
     ) {
-        match command {
-            "mute" => {
-                if let Ok(mute_player_index) = arg.parse::<PlayerIndex>() {
-                    self.mute_player(player_id, mute_player_index);
-                }
+        match parse_chat_command(command, arg) {
+            ChatCommand::Builtin(BuiltinCommand::Mute(Some(player_index))) => {
+                self.mute_player(player_id, player_index);
             }
-            "unmute" => {
-                if let Ok(mute_player_index) = arg.parse::<PlayerIndex>() {
-                    self.unmute_player(player_id, mute_player_index);
-                }
+            ChatCommand::Builtin(BuiltinCommand::Unmute(Some(player_index))) => {
+                self.unmute_player(player_id, player_index);
             }
-            /*"shadowmute" => {
-                if let Ok(mute_player_index) = arg.parse::<usize>() {
-                    if mute_player_index < self.players.len() {
-                        self.shadowmute_player(player_index, mute_player_index);
-                    }
-                }
-            },*/
-            "mutechat" => {
-                self.mute_chat(player_id);
+            ChatCommand::Builtin(BuiltinCommand::MuteChat) => self.mute_chat(player_id),
+            ChatCommand::Builtin(BuiltinCommand::UnmuteChat) => self.unmute_chat(player_id),
+            ChatCommand::Builtin(BuiltinCommand::Kick(Some(player_index))) => {
+                self.kick_player(player_id, player_index, false, behaviour);
             }
-            "unmutechat" => {
-                self.unmute_chat(player_id);
+            ChatCommand::Builtin(BuiltinCommand::KickAll(name)) => {
+                self.kick_all_matching(player_id, name, false, behaviour);
             }
-            "kick" => {
-                if let Ok(kick_player_index) = arg.parse::<PlayerIndex>() {
-                    self.kick_player(player_id, kick_player_index, false, behaviour);
-                }
+            ChatCommand::Builtin(BuiltinCommand::Ban(Some(player_index))) => {
+                self.kick_player(player_id, player_index, true, behaviour);
             }
-            "kickall" => {
-                self.kick_all_matching(player_id, arg, false, behaviour);
+            ChatCommand::Builtin(BuiltinCommand::BanAll(name)) => {
+                self.kick_all_matching(player_id, name, true, behaviour);
             }
-            "ban" => {
-                if let Ok(kick_player_index) = arg.parse::<PlayerIndex>() {
-                    self.kick_player(player_id, kick_player_index, true, behaviour);
-                }
+            ChatCommand::Builtin(BuiltinCommand::ClearBans) => self.clear_bans(player_id),
+            ChatCommand::Builtin(BuiltinCommand::SetRecording(rule)) => {
+                self.set_recording(player_id, rule);
             }
-            "banall" => {
-                self.kick_all_matching(player_id, arg, true, behaviour);
-            }
-            "clearbans" => {
-                self.clear_bans(player_id);
-            }
-            "replay" | "record" => self.set_recording(player_id, arg),
-            "lefty" => {
+            ChatCommand::Builtin(BuiltinCommand::Lefty) => {
                 self.state.set_hand(SkaterHand::Left, player_id);
             }
-            "righty" => {
+            ChatCommand::Builtin(BuiltinCommand::Righty) => {
                 self.state.set_hand(SkaterHand::Right, player_id);
             }
-            "admin" => {
-                self.admin_login(player_id, arg);
+            ChatCommand::Builtin(BuiltinCommand::Admin(password)) => {
+                self.admin_login(player_id, password);
             }
-            "serverrestart" => {
-                self.restart_server(player_id);
+            ChatCommand::Builtin(BuiltinCommand::RestartServer) => self.restart_server(player_id),
+            ChatCommand::Builtin(BuiltinCommand::List(Some(first_index))) => {
+                self.list_players(player_id, first_index);
             }
-            "list" => {
-                if arg.is_empty() {
-                    self.list_players(player_id, 0);
-                } else if let Ok(first_index) = arg.parse::<usize>() {
-                    self.list_players(player_id, first_index);
-                }
+            ChatCommand::Builtin(BuiltinCommand::Search(name)) => {
+                self.search_players(player_id, name)
             }
-            "search" => {
-                self.search_players(player_id, arg);
+            ChatCommand::Builtin(BuiltinCommand::Ping(Some(player_index))) => {
+                self.ping(player_index, player_id);
             }
-            "ping" => {
-                if let Ok(ping_player_index) = arg.parse::<PlayerIndex>() {
-                    self.ping(ping_player_index, player_id);
-                }
+            ChatCommand::Builtin(BuiltinCommand::PingByName(name)) => {
+                self.ping_by_name(player_id, name);
             }
-            "pings" => {
-                if let Some((ping_player_id, _name)) = self.player_exact_unique_match(arg) {
-                    self.ping(ping_player_id.index, player_id);
-                } else {
-                    let matches = self.player_search(arg);
-                    if matches.is_empty() {
-                        self.state
-                            .player_message_state
-                            .add_directed_server_chat_message("No matches found", player_id);
-                    } else if matches.len() > 1 {
-                        self.state
-                            .player_message_state
-                            .add_directed_server_chat_message(
-                                "Multiple matches found, use /ping X",
-                                player_id,
-                            );
-                        for (found_player_id, found_player_name) in matches.into_iter().take(5) {
-                            let msg = format!("{}: {}", found_player_id.index, found_player_name);
-                            self.state
-                                .player_message_state
-                                .add_directed_server_chat_message(msg, player_id);
-                        }
-                    } else {
-                        self.ping(matches[0].0.index, player_id);
-                    }
-                }
+            ChatCommand::Builtin(BuiltinCommand::View(Some(player_index))) => {
+                self.view(player_index, player_id);
             }
-            "view" => {
-                if let Ok(view_player_index) = arg.parse::<PlayerIndex>() {
-                    self.view(view_player_index, player_id);
-                }
+            ChatCommand::Builtin(BuiltinCommand::ViewByName(name)) => {
+                self.view_by_name(player_id, name);
             }
-            "views" => {
-                if let Some((view_player_id, _name)) = self.player_exact_unique_match(arg) {
-                    self.view(view_player_id.index, player_id);
-                } else {
-                    let matches = self.player_search(arg);
-                    if matches.is_empty() {
-                        self.state
-                            .player_message_state
-                            .add_directed_server_chat_message("No matches found", player_id);
-                    } else if matches.len() > 1 {
-                        self.state
-                            .player_message_state
-                            .add_directed_server_chat_message(
-                                "Multiple matches found, use /view X",
-                                player_id,
-                            );
-                        for (found_player_id, found_player_name) in matches.into_iter().take(5) {
-                            let str = format!("{}: {}", found_player_id.index, found_player_name);
-                            self.state
-                                .player_message_state
-                                .add_directed_server_chat_message(str, player_id);
-                        }
-                    } else {
-                        self.view(matches[0].0.index, player_id);
-                    }
-                }
-            }
-            "restoreview" => {
+            ChatCommand::Builtin(BuiltinCommand::RestoreView) => {
                 if let Some(player) = self
                     .state
                     .player_message_state
@@ -692,12 +619,12 @@ impl HQMServer {
                     }
                 }
             }
-            "t" => {
+            ChatCommand::Builtin(BuiltinCommand::TeamChat(message)) => {
                 self.state
                     .player_message_state
-                    .add_user_team_message(arg, player_id);
+                    .add_user_team_message(message, player_id);
             }
-            "version" => {
+            ChatCommand::Builtin(BuiltinCommand::Version) => {
                 let version = env!("CARGO_PKG_VERSION");
                 let s = format!("Migo HQM Server, version {version}");
 
@@ -705,7 +632,7 @@ impl HQMServer {
                     .player_message_state
                     .add_directed_server_chat_message(s, player_id);
             }
-            "git" => {
+            ChatCommand::Builtin(BuiltinCommand::Git) => {
                 let git_sha = option_env!("VERGEN_GIT_SHA");
                 let s: Cow<'static, str> = if let Some(git_sha) = git_sha {
                     format!("Git commit: {git_sha}").into()
@@ -716,8 +643,10 @@ impl HQMServer {
                     .player_message_state
                     .add_directed_server_chat_message(s, player_id);
             }
-
-            _ => behaviour.handle_command(self.into(), command, arg, player_id),
+            ChatCommand::Builtin(_) => {}
+            ChatCommand::GameMode { command, arg } => {
+                behaviour.handle_command(self.into(), command, arg, player_id);
+            }
         }
     }
 
@@ -868,6 +797,53 @@ impl HQMServer {
             }
         }
         found
+    }
+
+    fn player_index_from_name(
+        &mut self,
+        receiver_id: PlayerId,
+        name: &str,
+        command: &str,
+    ) -> Option<PlayerIndex> {
+        if let Some((player_id, _)) = self.player_exact_unique_match(name) {
+            return Some(player_id.index);
+        }
+
+        let matches = self.player_search(name);
+        match matches.as_slice() {
+            [] => {
+                self.state
+                    .player_message_state
+                    .add_directed_server_chat_message("No matches found", receiver_id);
+                None
+            }
+            [(player_id, _)] => Some(player_id.index),
+            _ => {
+                let message = format!("Multiple matches found, use /{command} X");
+                self.state
+                    .player_message_state
+                    .add_directed_server_chat_message(message, receiver_id);
+                for (player_id, player_name) in matches {
+                    let message = format!("{}: {}", player_id.index, player_name);
+                    self.state
+                        .player_message_state
+                        .add_directed_server_chat_message(message, receiver_id);
+                }
+                None
+            }
+        }
+    }
+
+    fn ping_by_name(&mut self, player_id: PlayerId, name: &str) {
+        if let Some(ping_player_index) = self.player_index_from_name(player_id, name, "ping") {
+            self.ping(ping_player_index, player_id);
+        }
+    }
+
+    fn view_by_name(&mut self, player_id: PlayerId, name: &str) {
+        if let Some(view_player_index) = self.player_index_from_name(player_id, name, "view") {
+            self.view(view_player_index, player_id);
+        }
     }
 
     fn process_message<B: GameMode>(
@@ -1155,93 +1131,172 @@ struct ReplayTick {
     packets: [ObjectPacket; 32],
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum BuiltinCommand<'a> {
+    Mute(Option<PlayerIndex>),
+    Unmute(Option<PlayerIndex>),
+    MuteChat,
+    UnmuteChat,
+    Kick(Option<PlayerIndex>),
+    KickAll(&'a str),
+    Ban(Option<PlayerIndex>),
+    BanAll(&'a str),
+    ClearBans,
+    SetRecording(&'a str),
+    Lefty,
+    Righty,
+    Admin(&'a str),
+    RestartServer,
+    List(Option<usize>),
+    Search(&'a str),
+    Ping(Option<PlayerIndex>),
+    PingByName(&'a str),
+    View(Option<PlayerIndex>),
+    ViewByName(&'a str),
+    RestoreView,
+    TeamChat(&'a str),
+    Version,
+    Git,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChatCommand<'a> {
+    Builtin(BuiltinCommand<'a>),
+    GameMode { command: &'a str, arg: &'a str },
+}
+
+fn parse_chat_command<'a>(command: &'a str, arg: &'a str) -> ChatCommand<'a> {
+    let builtin = match command {
+        "mute" => BuiltinCommand::Mute(arg.parse().ok()),
+        "unmute" => BuiltinCommand::Unmute(arg.parse().ok()),
+        "mutechat" => BuiltinCommand::MuteChat,
+        "unmutechat" => BuiltinCommand::UnmuteChat,
+        "kick" => BuiltinCommand::Kick(arg.parse().ok()),
+        "kickall" => BuiltinCommand::KickAll(arg),
+        "ban" => BuiltinCommand::Ban(arg.parse().ok()),
+        "banall" => BuiltinCommand::BanAll(arg),
+        "clearbans" => BuiltinCommand::ClearBans,
+        "replay" | "record" => BuiltinCommand::SetRecording(arg),
+        "lefty" => BuiltinCommand::Lefty,
+        "righty" => BuiltinCommand::Righty,
+        "admin" => BuiltinCommand::Admin(arg),
+        "serverrestart" => BuiltinCommand::RestartServer,
+        "list" => BuiltinCommand::List(if arg.is_empty() {
+            Some(0)
+        } else {
+            arg.parse().ok()
+        }),
+        "search" => BuiltinCommand::Search(arg),
+        "ping" => BuiltinCommand::Ping(arg.parse().ok()),
+        "pings" => BuiltinCommand::PingByName(arg),
+        "view" => BuiltinCommand::View(arg.parse().ok()),
+        "views" => BuiltinCommand::ViewByName(arg),
+        "restoreview" => BuiltinCommand::RestoreView,
+        "t" => BuiltinCommand::TeamChat(arg),
+        "version" => BuiltinCommand::Version,
+        "git" => BuiltinCommand::Git,
+        _ => {
+            return ChatCommand::GameMode { command, arg };
+        }
+    };
+    ChatCommand::Builtin(builtin)
+}
+
+#[derive(Clone, Copy)]
+struct UpdatePacket<'a> {
+    game_id: u32,
+    packets: &'a ArrayDeque<[ObjectPacket; 32], 192, Wrapping>,
+    game_step: u32,
+    scoreboard: &'a ScoreboardValues,
+    current_packet: u32,
+    force_view: Option<PlayerIndex>,
+}
+
+fn encode_update_packet(
+    write_buf: &mut BytesMut,
+    update: UpdatePacket<'_>,
+    player: &NetworkPlayerData,
+) {
+    write_buf.clear();
+    let mut writer = HQMMessageWriter::new(write_buf);
+
+    if player.game_id != update.game_id {
+        writer.write_bytes_aligned(GAME_HEADER);
+        writer.write_byte_aligned(NEW_GAME_PACKET_TYPE);
+        writer.write_u32_aligned(update.game_id);
+        return;
+    }
+
+    writer.write_bytes_aligned(GAME_HEADER);
+    writer.write_byte_aligned(UPDATE_PACKET_TYPE);
+    writer.write_u32_aligned(update.game_id);
+    writer.write_u32_aligned(update.game_step);
+    writer.write_bits(1, u32::from(update.scoreboard.game_over));
+    writer.write_bits(8, update.scoreboard.red_score);
+    writer.write_bits(8, update.scoreboard.blue_score);
+    writer.write_bits(16, update.scoreboard.time);
+
+    writer.write_bits(16, update.scoreboard.goal_message_timer);
+    writer.write_bits(8, update.scoreboard.period);
+    let view = update.force_view.unwrap_or(player.view_player_index).0 as u32;
+    writer.write_bits(8, view);
+
+    if player.client_version.has_ping() {
+        writer.write_u32_aligned(player.deltatime);
+    }
+
+    if player.client_version.has_rules() {
+        let rules = match update.scoreboard.rules_state {
+            RulesState::Regular {
+                offside_warning,
+                icing_warning,
+            } => u32::from(offside_warning) | (u32::from(icing_warning) << 1),
+            RulesState::Offside => 4,
+            RulesState::Icing => 8,
+        };
+        writer.write_u32_aligned(rules);
+    }
+
+    write_objects(
+        &mut writer,
+        update.packets,
+        update.current_packet,
+        player.known_packet,
+    );
+
+    let start = player.known_msgpos.min(player.messages.len());
+    let remaining_messages = (player.messages.len() - start).min(MAX_MESSAGES_PER_UPDATE);
+    writer.write_bits(4, remaining_messages as u32);
+    writer.write_bits(16, start as u32);
+
+    for message in &player.messages[start..start + remaining_messages] {
+        write_message(&mut writer, Rc::as_ref(message));
+    }
+}
+
 async fn send_updates(
     game_id: u32,
     packets: &ArrayDeque<[ObjectPacket; 32], 192, Wrapping>,
     game_step: u32,
-    value: &ScoreboardValues,
+    scoreboard: &ScoreboardValues,
     current_packet: u32,
     players: &[(u32, Option<ServerPlayer>)],
     socket: &UdpSocket,
     force_view: Option<PlayerIndex>,
     write_buf: &mut BytesMut,
 ) {
+    let update = UpdatePacket {
+        game_id,
+        packets,
+        game_step,
+        scoreboard,
+        current_packet,
+        force_view,
+    };
+
     for (_, player) in players.iter_players() {
         if let ServerPlayerData::NetworkPlayer { data } = &player.data {
-            write_buf.clear();
-            let mut writer = HQMMessageWriter::new(write_buf);
-
-            if data.game_id != game_id {
-                writer.write_bytes_aligned(GAME_HEADER);
-                writer.write_byte_aligned(6);
-                writer.write_u32_aligned(game_id);
-            } else {
-                writer.write_bytes_aligned(GAME_HEADER);
-                writer.write_byte_aligned(5);
-                writer.write_u32_aligned(game_id);
-                writer.write_u32_aligned(game_step);
-                writer.write_bits(
-                    1,
-                    match value.game_over {
-                        true => 1,
-                        false => 0,
-                    },
-                );
-                writer.write_bits(8, value.red_score);
-                writer.write_bits(8, value.blue_score);
-                writer.write_bits(16, value.time);
-
-                writer.write_bits(16, value.goal_message_timer);
-                writer.write_bits(8, value.period);
-                let view = force_view.unwrap_or(data.view_player_index).0 as u32;
-                writer.write_bits(8, view);
-
-                // if using a non-cryptic version, send ping
-                if data.client_version.has_ping() {
-                    writer.write_u32_aligned(data.deltatime);
-                }
-
-                // if baba's second version or above, send rules
-                if data.client_version.has_rules() {
-                    let num = match value.rules_state {
-                        RulesState::Regular {
-                            offside_warning,
-                            icing_warning,
-                        } => {
-                            let mut res = 0;
-                            if offside_warning {
-                                res |= 1;
-                            }
-                            if icing_warning {
-                                res |= 2;
-                            }
-                            res
-                        }
-                        RulesState::Offside => 4,
-                        RulesState::Icing => 8,
-                    };
-                    writer.write_u32_aligned(num);
-                }
-
-                write_objects(&mut writer, packets, current_packet, data.known_packet);
-
-                let (start, remaining_messages) = if data.known_msgpos > data.messages.len() {
-                    (data.messages.len(), 0)
-                } else {
-                    (
-                        data.known_msgpos,
-                        min(data.messages.len() - data.known_msgpos, 15),
-                    )
-                };
-
-                writer.write_bits(4, remaining_messages as u32);
-                writer.write_bits(16, start as u32);
-
-                for message in &data.messages[start..start + remaining_messages] {
-                    write_message(&mut writer, Rc::as_ref(message));
-                }
-            }
-
+            encode_update_packet(write_buf, update, data);
             let slice: &[u8] = write_buf;
             let _ = socket.send_to(slice, data.addr).await;
         }
@@ -1353,4 +1408,107 @@ pub async fn run_server<B: GameMode>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::players::ServerPlayer;
+
+    fn network_player() -> ServerPlayer {
+        ServerPlayer::new_network_player(
+            PlayerIndex(0),
+            "test",
+            "127.0.0.1:12345".parse().unwrap(),
+            &[],
+        )
+    }
+
+    #[test]
+    fn parses_builtin_commands_without_forwarding_them_to_the_game_mode() {
+        assert_eq!(
+            parse_chat_command("kick", "12"),
+            ChatCommand::Builtin(BuiltinCommand::Kick(Some(PlayerIndex(12))))
+        );
+        assert_eq!(
+            parse_chat_command("record", "standby"),
+            ChatCommand::Builtin(BuiltinCommand::SetRecording("standby"))
+        );
+        assert_eq!(
+            parse_chat_command("list", ""),
+            ChatCommand::Builtin(BuiltinCommand::List(Some(0)))
+        );
+        assert_eq!(
+            parse_chat_command("view", "not-a-player"),
+            ChatCommand::Builtin(BuiltinCommand::View(None))
+        );
+    }
+
+    #[test]
+    fn preserves_unknown_commands_for_the_game_mode() {
+        match parse_chat_command("faceoff", "center") {
+            ChatCommand::GameMode { command, arg } => {
+                assert_eq!(command, "faceoff");
+                assert_eq!(arg, "center");
+            }
+            ChatCommand::Builtin(_) => panic!("unknown command was treated as built-in"),
+        }
+    }
+
+    #[test]
+    fn encodes_new_game_packet_without_replication_data() {
+        let mut player = network_player();
+        let ServerPlayerData::NetworkPlayer { data } = &mut player.data else {
+            panic!("expected a network player");
+        };
+        let mut buf = BytesMut::new();
+        let packets = ArrayDeque::new();
+        let scoreboard = ScoreboardValues::default();
+
+        encode_update_packet(
+            &mut buf,
+            UpdatePacket {
+                game_id: 42,
+                packets: &packets,
+                game_step: 0,
+                scoreboard: &scoreboard,
+                current_packet: 0,
+                force_view: None,
+            },
+            data,
+        );
+
+        assert_eq!(buf.as_ref(), b"Hock\x06\x2a\x00\x00\x00");
+    }
+
+    #[test]
+    fn encodes_update_packet_when_the_client_is_in_the_current_game() {
+        let mut player = network_player();
+        let ServerPlayerData::NetworkPlayer { data } = &mut player.data else {
+            panic!("expected a network player");
+        };
+        data.game_id = 42;
+
+        let mut packets: ArrayDeque<[ObjectPacket; 32], 192, Wrapping> = ArrayDeque::new();
+        packets.push_front([const { ObjectPacket::None }; 32]);
+        let scoreboard = ScoreboardValues::default();
+        let mut buf = BytesMut::new();
+
+        encode_update_packet(
+            &mut buf,
+            UpdatePacket {
+                game_id: 42,
+                packets: &packets,
+                game_step: 11,
+                scoreboard: &scoreboard,
+                current_packet: 0,
+                force_view: None,
+            },
+            data,
+        );
+
+        assert_eq!(&buf[..9], b"Hock\x05\x2a\x00\x00\x00");
+        assert!(buf.len() > 9);
+    }
 }
