@@ -326,8 +326,8 @@ impl AttackState {
             Team::Blue => Vec3::Z,
         };
         let progress = {
-            let mut state = server.state();
-            let mut objects = state.objects();
+            let state = server.state();
+            let objects = state.objects();
             let puck = objects.get_puck(0)?;
             (puck.body.pos - center_pos).dot(normal)
         };

@@ -32,7 +32,9 @@ pub trait GameMode {
 
     /// Called once each tick after the physics simulation is done.
     /// A list of physics events that occurred during the simulation is provided. Most of them have to do with the puck's movement.
-    /// You can update the score, add chat messages and so on, but you should not move players to and from teams, or spawn new objects.
+    ///
+    /// Changes to the server state are included in this tick's replication and recording data, but
+    /// do not affect physics until the next tick.
     fn after_tick(&mut self, server: ServerMut, events: &[PhysicsEvent]) -> ScoreboardValues;
 
     /// Called when a chat message starting with "/" is received from a user. This method is called between ticks and not during, so you can do anything here.
@@ -62,7 +64,9 @@ pub trait GameMode {
     fn after_player_join(&mut self, _server: ServerMut, _player_index: PlayerId) {}
 
     /// Gets the server team size that will be shown in the server list.
-    fn server_list_team_size(&self) -> u32;
+    fn server_list_team_size(&self) -> u32 {
+        0
+    }
 
     fn include_tick_in_recording(&self, _server: Server) -> bool {
         false
@@ -96,6 +100,21 @@ impl<'a> From<&'a mut HQMServer> for ServerMut<'a> {
 }
 
 impl<'a> ServerMut<'a> {
+    /// Splits this handle into mutable handles for the independent server parts.
+    ///
+    /// Unlike [ServerMut::as_mut_parts], the returned handles retain the full lifetime of this
+    /// server handle. This is useful when the original `ServerMut` is no longer needed.
+    pub fn into_parts(self) -> ServerMutParts<'a> {
+        let server = self.server;
+        ServerMutParts {
+            state: ServerStateMut {
+                state: &mut server.state,
+            },
+            rink: &mut server.rink,
+            config: &mut server.config,
+        }
+    }
+
     pub fn as_mut_parts(&mut self) -> ServerMutParts<'_> {
         ServerMutParts {
             state: ServerStateMut {
@@ -201,7 +220,7 @@ impl<'a> ServerStateMut<'a> {
         }
     }
 
-    pub fn objects(&mut self) -> ServerObjects<'_> {
+    pub fn objects(&self) -> ServerObjects<'_> {
         ServerObjects {
             objects: &self.state.objects,
         }
@@ -272,7 +291,7 @@ impl<'a> ServerState<'a> {
         }
     }
 
-    pub fn objects(&mut self) -> ServerObjects<'_> {
+    pub fn objects(&self) -> ServerObjects<'_> {
         ServerObjects {
             objects: &self.state.objects,
         }
@@ -308,11 +327,37 @@ impl<'a> ServerObjectsMut<'a> {
         }
     }
 
-    pub fn get_puck(&mut self, object_index: usize) -> Option<&Puck> {
+    pub fn get_puck(&self, object_index: usize) -> Option<&Puck> {
         self.objects.get(object_index).and_then(|x| match x {
             Some(GameObject::Puck(puck)) => Some(puck),
             _ => None,
         })
+    }
+
+    /// Iterates over every puck and its object index.
+    pub fn pucks(&self) -> impl Iterator<Item = (usize, &Puck)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, object)| {
+                let Some(GameObject::Puck(puck)) = object else {
+                    return None;
+                };
+                Some((index, puck))
+            })
+    }
+
+    /// Iterates mutably over every puck and its object index.
+    pub fn pucks_mut(&mut self) -> impl Iterator<Item = (usize, &mut Puck)> {
+        self.objects
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, object)| {
+                let Some(GameObject::Puck(puck)) = object else {
+                    return None;
+                };
+                Some((index, puck))
+            })
     }
 
     pub fn get_puck_mut(&mut self, object_index: usize) -> Option<&mut Puck> {
@@ -329,11 +374,24 @@ pub struct ServerObjects<'a> {
 }
 
 impl<'a> ServerObjects<'a> {
-    pub fn get_puck(&mut self, object_index: usize) -> Option<&Puck> {
+    pub fn get_puck(&self, object_index: usize) -> Option<&Puck> {
         self.objects.get(object_index).and_then(|x| match x {
             Some(GameObject::Puck(puck)) => Some(puck),
             _ => None,
         })
+    }
+
+    /// Iterates over every puck and its object index.
+    pub fn pucks(&self) -> impl Iterator<Item = (usize, &Puck)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, object)| {
+                let Some(GameObject::Puck(puck)) = object else {
+                    return None;
+                };
+                Some((index, puck))
+            })
     }
 }
 
@@ -633,4 +691,31 @@ pub enum ExitReason {
     Disconnected,
     Timeout,
     AdminKicked,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn puck_iterators_return_indices_and_allow_mutation() {
+        let mut objects: [Option<GameObject>; 4] = std::array::from_fn(|_| None);
+        objects[1] = Some(GameObject::Puck(Puck::new(Vec3::X, Rot3::IDENTITY)));
+        objects[3] = Some(GameObject::Puck(Puck::new(Vec3::Z, Rot3::IDENTITY)));
+
+        let indices: Vec<_> = ServerObjects { objects: &objects }
+            .pucks()
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(indices, [1, 3]);
+
+        let mut object_view = ServerObjectsMut {
+            objects: &mut objects,
+        };
+        for (_, puck) in object_view.pucks_mut() {
+            puck.radius = 0.25;
+        }
+
+        assert!(object_view.pucks().all(|(_, puck)| puck.radius == 0.25));
+    }
 }
