@@ -1198,11 +1198,10 @@ impl HQMServer {
         self.state.replay.advance_step();
 
         let events = self.simulate_step();
-
-        let packets = self.get_packets();
-
         let scoreboard = behaviour.after_tick(self.into(), &events);
         self.state.replication.last_scoreboard = Some(scoreboard);
+
+        let packets = self.get_packets();
 
         self.state.replay.record_tick(packets.clone());
 
@@ -1685,7 +1684,27 @@ pub async fn run_server<B: GameMode>(
 mod tests {
     use super::*;
 
+    use crate::ban::InMemoryBanCheck;
+    use crate::game::PhysicsEvent;
+    use crate::gamemode::ServerMut;
     use crate::players::ServerPlayer;
+    use crate::record::RecordingSaveToFile;
+
+    fn test_server() -> HQMServer {
+        HQMServer::new(
+            ServerConfiguration {
+                welcome: vec![],
+                password: None,
+                player_max: 16,
+                recording_enabled: ReplayRecording::Off,
+                server_name: "test".to_owned(),
+                server_service: None,
+            },
+            PhysicsConfiguration::default(),
+            Box::new(InMemoryBanCheck::new()),
+            Box::new(RecordingSaveToFile::new(".".into())),
+        )
+    }
 
     fn network_player() -> ServerPlayer {
         ServerPlayer::new_network_player(
@@ -1846,5 +1865,35 @@ mod tests {
                 .is_some_and(|player| !player.has_skater())
         );
         assert!(state.objects[object_slot.index()].is_none());
+    }
+
+    #[test]
+    fn after_tick_mutations_are_captured_in_current_packet_history() {
+        struct SpawnsPuckAfterTick;
+
+        impl GameMode for SpawnsPuckAfterTick {
+            fn before_tick(&mut self, _server: ServerMut) {}
+
+            fn after_tick(
+                &mut self,
+                mut server: ServerMut,
+                _events: &[PhysicsEvent],
+            ) -> ScoreboardValues {
+                server
+                    .state_mut()
+                    .objects_mut()
+                    .spawn_puck(Puck::new(Vec3::ZERO, Rot3::IDENTITY));
+                ScoreboardValues::default()
+            }
+        }
+
+        let mut server = test_server();
+        let mut behaviour = SpawnsPuckAfterTick;
+        server.game_step(&mut behaviour);
+
+        assert!(matches!(
+            server.state.replication.history.current_objects()[0],
+            ObjectPacket::Puck(_)
+        ));
     }
 }
