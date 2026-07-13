@@ -8,44 +8,40 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arraydeque::{ArrayDeque, Wrapping};
-use async_stream::stream;
 use bytes::{BufMut, BytesMut};
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 
 use glam::Vec3;
 use glamx::Rot3;
 use std::error::Error;
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
+use tokio_util::udp::UdpFramed;
 use tracing::{info, warn};
 
 use crate::gamemode::{ExitReason, GameMode};
 
 use crate::ban::{BanCheck, BanCheckResponse};
 use crate::game::{
-    PhysicsConfiguration, PlayerId, PlayerIndex, PlayerInput, Puck, Rink, RulesState,
-    ScoreboardValues, SkaterHand, SkaterObject, Team,
+    PhysicsConfiguration, PlayerId, PlayerIndex, PlayerInput, Puck, Rink, ScoreboardValues,
+    SkaterHand, SkaterObject, Team,
 };
-use crate::players::NetworkPlayerData;
 pub(crate) use crate::players::{
     HQMMessage, MessageRecording, MessageRetention, MuteStatus, PlayerListExt, PlayerSlots,
     ServerPlayerData, ServerPlayersAndMessages,
 };
 use crate::protocol::{
-    HQMClientToServerMessage, HQMMessageCodec, HQMMessageWriter, ObjectPacket, write_message,
-    write_objects,
+    HQMClientToServerMessage, HQMMasterServerRegistration, HQMMessageCodec, HQMMessageWriter,
+    HQMServerToClientMessage, HQMServerUpdate, ObjectPacket, write_message, write_objects,
 };
 use crate::record::RecordingSaveMethod;
 use crate::{ReplayRecording, ServerConfiguration};
 
-pub(crate) const GAME_HEADER: &[u8] = b"Hock";
-
-const UPDATE_PACKET_TYPE: u8 = 5;
-const NEW_GAME_PACKET_TYPE: u8 = 6;
-const MAX_MESSAGES_PER_UPDATE: usize = 15;
 const PACKET_HISTORY_LEN: usize = 192;
 const NO_PACKET_SEQUENCE: u32 = u32::MAX;
+
+type HQMFramedSocket = UdpFramed<HQMMessageCodec, Arc<UdpSocket>>;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObjectSlot(usize);
@@ -607,10 +603,9 @@ impl HQMServer {
     pub(crate) async fn handle_message<B: GameMode>(
         &mut self,
         addr: SocketAddr,
-        socket: &Arc<UdpSocket>,
+        socket: &mut HQMFramedSocket,
         command: HQMClientToServerMessage,
         behaviour: &mut B,
-        write_buf: &mut BytesMut,
     ) {
         match command {
             HQMClientToServerMessage::Join {
@@ -640,7 +635,7 @@ impl HQMServer {
             ),
             HQMClientToServerMessage::Exit => self.player_exit(addr, behaviour),
             HQMClientToServerMessage::ServerInfo { version, ping } => {
-                self.request_info(socket, addr, version, ping, behaviour, write_buf)
+                self.request_info(socket, addr, version, ping, behaviour)
                     .await;
             }
         }
@@ -648,31 +643,19 @@ impl HQMServer {
 
     async fn request_info<B: GameMode>(
         &self,
-        socket: &Arc<UdpSocket>,
+        socket: &mut HQMFramedSocket,
         addr: SocketAddr,
         _version: u32,
         ping: u32,
         behaviour: &B,
-        write_buf: &mut BytesMut,
     ) {
-        write_buf.clear();
-        let mut writer = HQMMessageWriter::new(write_buf);
-        writer.write_bytes_aligned(GAME_HEADER);
-        writer.write_byte_aligned(1);
-        writer.write_bits(8, 55);
-        writer.write_u32_aligned(ping);
-
-        let player_count = self.real_player_count();
-        writer.write_bits(8, player_count as u32);
-        writer.write_bits(4, 4);
-        writer.write_bits(4, behaviour.server_list_team_size());
-
-        writer.write_bytes_aligned_padded(32, self.config.server_name.as_ref());
-
-        let socket = socket.clone();
-
-        let slice: &[u8] = write_buf;
-        let _ = socket.send_to(slice, addr).await;
+        let message = HQMServerToClientMessage::ServerInfo {
+            ping,
+            player_count: self.real_player_count(),
+            team_size: behaviour.server_list_team_size(),
+            server_name: self.config.server_name.as_ref(),
+        };
+        let _ = socket.send((message, addr)).await;
     }
 
     fn real_player_count(&self) -> usize {
@@ -1303,9 +1286,8 @@ impl HQMServer {
 
     pub(crate) async fn tick<B: GameMode>(
         &mut self,
-        socket: &UdpSocket,
+        socket: &mut HQMFramedSocket,
         behaviour: &mut B,
-        write_buf: &mut BytesMut,
     ) {
         let tick_output = tokio::task::block_in_place(|| self.advance_tick(behaviour));
         if let Some(tick_output) = tick_output {
@@ -1317,7 +1299,6 @@ impl HQMServer {
                 &self.state.player_message_state.players,
                 socket,
                 tick_output.forced_view,
-                write_buf,
             )
             .await;
         }
@@ -1480,83 +1461,16 @@ fn parse_chat_command<'a>(command: &'a str, arg: &'a str) -> ChatCommand<'a> {
     ChatCommand::Builtin(builtin)
 }
 
-#[derive(Clone, Copy)]
-struct UpdatePacket<'a> {
-    game_id: u32,
-    history: &'a PacketHistory,
-    game_step: u32,
-    scoreboard: &'a ScoreboardValues,
-    force_view: Option<PlayerIndex>,
-}
-
-fn encode_update_packet(
-    write_buf: &mut BytesMut,
-    update: UpdatePacket<'_>,
-    player: &NetworkPlayerData,
-) {
-    write_buf.clear();
-    let mut writer = HQMMessageWriter::new(write_buf);
-
-    if player.game_id != update.game_id {
-        writer.write_bytes_aligned(GAME_HEADER);
-        writer.write_byte_aligned(NEW_GAME_PACKET_TYPE);
-        writer.write_u32_aligned(update.game_id);
-        return;
-    }
-
-    writer.write_bytes_aligned(GAME_HEADER);
-    writer.write_byte_aligned(UPDATE_PACKET_TYPE);
-    writer.write_u32_aligned(update.game_id);
-    writer.write_u32_aligned(update.game_step);
-    writer.write_bits(1, u32::from(update.scoreboard.game_over));
-    writer.write_bits(8, update.scoreboard.red_score);
-    writer.write_bits(8, update.scoreboard.blue_score);
-    writer.write_bits(16, update.scoreboard.time);
-
-    writer.write_bits(16, update.scoreboard.goal_message_timer);
-    writer.write_bits(8, update.scoreboard.period);
-    let view = update.force_view.unwrap_or(player.view_player_index).0 as u32;
-    writer.write_bits(8, view);
-
-    if player.client_version.has_ping() {
-        writer.write_u32_aligned(player.deltatime);
-    }
-
-    if player.client_version.has_rules() {
-        let rules = match update.scoreboard.rules_state {
-            RulesState::Regular {
-                offside_warning,
-                icing_warning,
-            } => u32::from(offside_warning) | (u32::from(icing_warning) << 1),
-            RulesState::Offside => 4,
-            RulesState::Icing => 8,
-        };
-        writer.write_u32_aligned(rules);
-    }
-
-    write_objects(&mut writer, update.history, player.known_packet);
-
-    let start = player.known_msgpos.min(player.messages.len());
-    let remaining_messages = (player.messages.len() - start).min(MAX_MESSAGES_PER_UPDATE);
-    writer.write_bits(4, remaining_messages as u32);
-    writer.write_bits(16, start as u32);
-
-    for message in &player.messages[start..start + remaining_messages] {
-        write_message(&mut writer, Rc::as_ref(message));
-    }
-}
-
 async fn send_updates(
     game_id: u32,
     history: &PacketHistory,
     game_step: u32,
     scoreboard: &ScoreboardValues,
     players: &PlayerSlots,
-    socket: &UdpSocket,
+    socket: &mut HQMFramedSocket,
     force_view: Option<PlayerIndex>,
-    write_buf: &mut BytesMut,
 ) {
-    let update = UpdatePacket {
+    let update = HQMServerUpdate {
         game_id,
         history,
         game_step,
@@ -1566,9 +1480,11 @@ async fn send_updates(
 
     for (_, player) in players.iter_players() {
         if let ServerPlayerData::NetworkPlayer { data } = &player.data {
-            encode_update_packet(write_buf, update, data);
-            let slice: &[u8] = write_buf;
-            let _ = socket.send_to(slice, data.addr).await;
+            let message = HQMServerToClientMessage::Update {
+                update,
+                recipient: data,
+            };
+            let _ = socket.send((message, data.addr)).await;
         }
     }
 }
@@ -1616,7 +1532,7 @@ pub async fn run_server<B: GameMode>(
     }
 
     if let Some(public) = public {
-        let socket = socket.clone();
+        let mut socket = UdpFramed::new(socket.clone(), HQMMessageCodec);
         let reqwest_client = reqwest_client.clone();
         let address = public.to_string();
         tokio::spawn(async move {
@@ -1625,8 +1541,7 @@ pub async fn run_server<B: GameMode>(
                 match master_server {
                     Ok(addr) => {
                         for _ in 0..60 {
-                            let msg = b"Hock\x20";
-                            let res = socket.send_to(msg, addr).await;
+                            let res = socket.send((HQMMasterServerRegistration, addr)).await;
                             if res.is_err() {
                                 break;
                             }
@@ -1641,48 +1556,26 @@ pub async fn run_server<B: GameMode>(
             }
         });
     }
-    enum Msg {
-        Time,
-        Message(SocketAddr, HQMClientToServerMessage),
-    }
-
-    let timeout_stream = tokio_stream::wrappers::IntervalStream::new(tick_timer).map(|_| Msg::Time);
-    let packet_stream = {
-        let socket = socket.clone();
-        stream! {
-            let mut buf = BytesMut::with_capacity(512);
-            let codec = HQMMessageCodec;
-            loop {
-                buf.clear();
-
-                if let Ok((_, addr)) = socket.recv_buf_from(&mut buf).await {
-                    if let Ok(data) = codec.parse_message(&buf) {
-                        yield Msg::Message(addr, data)
-                    }
-                }
-            }
-        }
-    };
-    tokio::pin!(packet_stream);
-
-    let mut stream = futures::stream_select!(timeout_stream, packet_stream);
-    let mut write_buf = BytesMut::with_capacity(4096);
-    while let Some(msg) = stream.next().await {
-        match msg {
-            Msg::Time => server.tick(&socket, &mut behaviour, &mut write_buf).await,
-            Msg::Message(addr, data) => {
+    let mut socket = UdpFramed::new(socket, HQMMessageCodec);
+    loop {
+        tokio::select! {
+            _ = tick_timer.tick() => server.tick(&mut socket, &mut behaviour).await,
+            message = socket.next() => {
+                let Some(Ok((data, addr))) = message else {
+                    continue;
+                };
                 server
-                    .handle_message(addr, &socket, data, &mut behaviour, &mut write_buf)
-                    .await
+                    .handle_message(addr, &mut socket, data, &mut behaviour)
+                    .await;
             }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_util::codec::Encoder;
 
     use crate::ban::InMemoryBanCheck;
     use crate::game::PhysicsEvent;
@@ -1713,6 +1606,11 @@ mod tests {
             "127.0.0.1:12345".parse().unwrap(),
             &[],
         )
+    }
+
+    fn encode_server_message(message: HQMServerToClientMessage<'_>, buf: &mut BytesMut) {
+        let mut codec = HQMMessageCodec;
+        assert!(codec.encode(message, buf).is_ok());
     }
 
     #[test]
@@ -1756,16 +1654,18 @@ mod tests {
         let history = PacketHistory::new();
         let scoreboard = ScoreboardValues::default();
 
-        encode_update_packet(
-            &mut buf,
-            UpdatePacket {
-                game_id: 42,
-                history: &history,
-                game_step: 0,
-                scoreboard: &scoreboard,
-                force_view: None,
+        encode_server_message(
+            HQMServerToClientMessage::Update {
+                update: HQMServerUpdate {
+                    game_id: 42,
+                    history: &history,
+                    game_step: 0,
+                    scoreboard: &scoreboard,
+                    force_view: None,
+                },
+                recipient: data,
             },
-            data,
+            &mut buf,
         );
 
         assert_eq!(buf.as_ref(), b"Hock\x06\x2a\x00\x00\x00");
@@ -1784,16 +1684,18 @@ mod tests {
         let scoreboard = ScoreboardValues::default();
         let mut buf = BytesMut::new();
 
-        encode_update_packet(
-            &mut buf,
-            UpdatePacket {
-                game_id: 42,
-                history: &history,
-                game_step: 11,
-                scoreboard: &scoreboard,
-                force_view: None,
+        encode_server_message(
+            HQMServerToClientMessage::Update {
+                update: HQMServerUpdate {
+                    game_id: 42,
+                    history: &history,
+                    game_step: 11,
+                    scoreboard: &scoreboard,
+                    force_view: None,
+                },
+                recipient: data,
             },
-            data,
+            &mut buf,
         );
 
         assert_eq!(&buf[..9], b"Hock\x05\x2a\x00\x00\x00");

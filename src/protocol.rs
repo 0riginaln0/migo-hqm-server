@@ -1,4 +1,5 @@
-use crate::game::PlayerInput;
+use crate::game::{PlayerIndex, PlayerInput, RulesState, ScoreboardValues};
+use crate::players::NetworkPlayerData;
 use crate::server::{HQMClientVersion, HQMMessage, PacketHistory, PacketNumber};
 use bytes::{BufMut, BytesMut};
 
@@ -6,7 +7,9 @@ use glam::{Vec2, Vec3};
 use glamx::Rot3;
 use std::cmp::min;
 use std::io::Error;
+use std::rc::Rc;
 use std::string::FromUtf8Error;
+use tokio_util::codec::{Decoder, Encoder};
 
 const TABLE: [[Vec3; 3]; 8] = [
     [Vec3::Y, Vec3::X, Vec3::Z],
@@ -20,6 +23,9 @@ const TABLE: [[Vec3; 3]; 8] = [
 ];
 
 const GAME_HEADER: &[u8] = b"Hock";
+const UPDATE_PACKET_TYPE: u8 = 5;
+const NEW_GAME_PACKET_TYPE: u8 = 6;
+const MAX_MESSAGES_PER_UPDATE: usize = 15;
 
 pub enum HQMClientToServerMessage {
     Join {
@@ -45,15 +51,12 @@ pub enum HQMClientToServerMessage {
 pub struct HQMMessageCodec;
 
 impl HQMMessageCodec {
-    pub fn parse_message(
-        &self,
-        src: &[u8],
-    ) -> Result<HQMClientToServerMessage, HQMClientToServerMessageDecoderError> {
+    pub fn parse_message(&self, src: &[u8]) -> Result<HQMClientToServerMessage, HQMDecodeError> {
         let mut parser = HQMMessageReader::new(src);
         let mut header = [0; 4];
         parser.read_bytes_aligned(&mut header);
         if header != GAME_HEADER {
-            return Err(HQMClientToServerMessageDecoderError::WrongHeader);
+            return Err(HQMDecodeError::WrongHeader);
         }
 
         let command = parser.read_byte_aligned();
@@ -64,14 +67,14 @@ impl HQMMessageCodec {
             8 => self.parse_player_update(&mut parser, HQMClientVersion::Ping),
             0x10 => self.parse_player_update(&mut parser, HQMClientVersion::PingRules),
             7 => Ok(HQMClientToServerMessage::Exit),
-            _ => Err(HQMClientToServerMessageDecoderError::UnknownType),
+            _ => Err(HQMDecodeError::UnknownType),
         }
     }
 
     fn parse_request_info(
         &self,
         parser: &mut HQMMessageReader,
-    ) -> Result<HQMClientToServerMessage, HQMClientToServerMessageDecoderError> {
+    ) -> Result<HQMClientToServerMessage, HQMDecodeError> {
         let version = parser.read_bits(8);
         let ping = parser.read_u32_aligned();
         Ok(HQMClientToServerMessage::ServerInfo { version, ping })
@@ -80,7 +83,7 @@ impl HQMMessageCodec {
     fn parse_player_join(
         &self,
         parser: &mut HQMMessageReader,
-    ) -> Result<HQMClientToServerMessage, HQMClientToServerMessageDecoderError> {
+    ) -> Result<HQMClientToServerMessage, HQMDecodeError> {
         let version = parser.read_bits(8);
         let mut player_name = [0; 32];
         parser.read_bytes_aligned(&mut player_name);
@@ -95,7 +98,7 @@ impl HQMMessageCodec {
         &self,
         parser: &mut HQMMessageReader,
         client_version: HQMClientVersion,
-    ) -> Result<HQMClientToServerMessage, HQMClientToServerMessageDecoderError> {
+    ) -> Result<HQMClientToServerMessage, HQMDecodeError> {
         let current_game_id = parser.read_u32_aligned();
 
         let input_stick_angle = parser.read_f32_aligned();
@@ -152,22 +155,176 @@ impl HQMMessageCodec {
         })
     }
 }
-pub enum HQMClientToServerMessageDecoderError {
+
+impl Decoder for HQMMessageCodec {
+    type Item = HQMClientToServerMessage;
+    type Error = HQMDecodeError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.is_empty() {
+            return Ok(None);
+        }
+
+        let message = self.parse_message(src);
+        src.clear();
+        message.map(Some)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HQMServerUpdate<'a> {
+    pub(crate) game_id: u32,
+    pub(crate) history: &'a PacketHistory,
+    pub(crate) game_step: u32,
+    pub(crate) scoreboard: &'a ScoreboardValues,
+    pub(crate) force_view: Option<PlayerIndex>,
+}
+
+pub(crate) enum HQMServerToClientMessage<'a> {
+    ServerInfo {
+        ping: u32,
+        player_count: usize,
+        team_size: u32,
+        server_name: &'a str,
+    },
+    Update {
+        update: HQMServerUpdate<'a>,
+        recipient: &'a NetworkPlayerData,
+    },
+}
+
+pub(crate) struct HQMMasterServerRegistration;
+
+impl<'a> Encoder<HQMServerToClientMessage<'a>> for HQMMessageCodec {
+    type Error = HQMEncodeError;
+
+    fn encode(
+        &mut self,
+        message: HQMServerToClientMessage<'a>,
+        dst: &mut BytesMut,
+    ) -> Result<(), Self::Error> {
+        dst.clear();
+        let mut writer = HQMMessageWriter::new(dst);
+
+        match message {
+            HQMServerToClientMessage::ServerInfo {
+                ping,
+                player_count,
+                team_size,
+                server_name,
+            } => {
+                writer.write_bytes_aligned(GAME_HEADER);
+                writer.write_byte_aligned(1);
+                writer.write_bits(8, 55);
+                writer.write_u32_aligned(ping);
+                writer.write_bits(8, player_count as u32);
+                writer.write_bits(4, 4);
+                writer.write_bits(4, team_size);
+                writer.write_bytes_aligned_padded(32, server_name.as_bytes());
+            }
+            HQMServerToClientMessage::Update { update, recipient } => {
+                write_update_packet(&mut writer, update, recipient);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Encoder<HQMMasterServerRegistration> for HQMMessageCodec {
+    type Error = HQMEncodeError;
+
+    fn encode(
+        &mut self,
+        _message: HQMMasterServerRegistration,
+        dst: &mut BytesMut,
+    ) -> Result<(), Self::Error> {
+        dst.clear();
+        dst.extend_from_slice(b"Hock\x20");
+        Ok(())
+    }
+}
+
+fn write_update_packet(
+    mut writer: &mut HQMMessageWriter,
+    update: HQMServerUpdate<'_>,
+    player: &NetworkPlayerData,
+) {
+    if player.game_id != update.game_id {
+        writer.write_bytes_aligned(GAME_HEADER);
+        writer.write_byte_aligned(NEW_GAME_PACKET_TYPE);
+        writer.write_u32_aligned(update.game_id);
+        return;
+    }
+
+    writer.write_bytes_aligned(GAME_HEADER);
+    writer.write_byte_aligned(UPDATE_PACKET_TYPE);
+    writer.write_u32_aligned(update.game_id);
+    writer.write_u32_aligned(update.game_step);
+    writer.write_bits(1, u32::from(update.scoreboard.game_over));
+    writer.write_bits(8, update.scoreboard.red_score);
+    writer.write_bits(8, update.scoreboard.blue_score);
+    writer.write_bits(16, update.scoreboard.time);
+
+    writer.write_bits(16, update.scoreboard.goal_message_timer);
+    writer.write_bits(8, update.scoreboard.period);
+    let view = update.force_view.unwrap_or(player.view_player_index).0 as u32;
+    writer.write_bits(8, view);
+
+    if player.client_version.has_ping() {
+        writer.write_u32_aligned(player.deltatime);
+    }
+
+    if player.client_version.has_rules() {
+        let rules = match update.scoreboard.rules_state {
+            RulesState::Regular {
+                offside_warning,
+                icing_warning,
+            } => u32::from(offside_warning) | (u32::from(icing_warning) << 1),
+            RulesState::Offside => 4,
+            RulesState::Icing => 8,
+        };
+        writer.write_u32_aligned(rules);
+    }
+
+    write_objects(&mut writer, update.history, player.known_packet);
+
+    let start = player.known_msgpos.min(player.messages.len());
+    let remaining_messages = (player.messages.len() - start).min(MAX_MESSAGES_PER_UPDATE);
+    writer.write_bits(4, remaining_messages as u32);
+    writer.write_bits(16, start as u32);
+
+    for message in &player.messages[start..start + remaining_messages] {
+        write_message(&mut writer, Rc::as_ref(message));
+    }
+}
+
+pub enum HQMDecodeError {
     IoError(std::io::Error),
     WrongHeader,
     UnknownType,
     StringDecoding(FromUtf8Error),
 }
 
-impl From<std::io::Error> for HQMClientToServerMessageDecoderError {
+impl From<std::io::Error> for HQMDecodeError {
     fn from(value: Error) -> Self {
-        HQMClientToServerMessageDecoderError::IoError(value)
+        HQMDecodeError::IoError(value)
     }
 }
 
-impl From<FromUtf8Error> for HQMClientToServerMessageDecoderError {
+impl From<FromUtf8Error> for HQMDecodeError {
     fn from(value: FromUtf8Error) -> Self {
-        HQMClientToServerMessageDecoderError::StringDecoding(value)
+        HQMDecodeError::StringDecoding(value)
+    }
+}
+
+pub enum HQMEncodeError {
+    IoError(std::io::Error),
+}
+
+impl From<std::io::Error> for HQMEncodeError {
+    fn from(value: Error) -> Self {
+        HQMEncodeError::IoError(value)
     }
 }
 
@@ -506,6 +663,20 @@ impl<'a> HQMMessageReader<'a> {
             pos: 0,
             bit_pos: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoder_discards_invalid_datagrams() {
+        let mut codec = HQMMessageCodec;
+        let mut datagram = BytesMut::from(&b"invalid"[..]);
+
+        assert!(codec.decode(&mut datagram).is_err());
+        assert!(datagram.is_empty());
     }
 }
 

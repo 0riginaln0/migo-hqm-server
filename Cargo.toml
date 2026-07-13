@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 glam = "0.32"
 glamx = "0.2"
 tokio = { version = "1", features = ["net", "time", "macros", "rt-multi-thread", "sync", "fs", "parking_lot"] }
+tokio-util = { version = "0.7", features = ["codec", "net"] }
 rust-ini = "0.21.0" # INI For configuration
 bytes = "1.6"
 reqwest = { version = "0.12", default-features=false, features = ["multipart", "rustls-tls"] }
@@ -21,10 +22,8 @@ arrayvec = "0.7.4"
 smallvec = { version = "1.11", features = ["union", "const_generics"]}
 systemctl = "0.4"
 futures = "0.3"
-async-stream = { version = "0.3.5", features = [] }
 itertools = "0.14.0"
 parking_lot = "0.12.2"
-tokio-stream = "0.1.15"
 notify-debouncer-full = "0.5"
 reborrow = { version="0.5.5", features=["derive"] }
 anyhow = "1"
