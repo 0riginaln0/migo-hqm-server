@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::f32::consts::PI;
 
 use glam::Vec3;
 use glamx::Rot3;
@@ -8,6 +7,11 @@ use reborrow::{Reborrow, ReborrowMut};
 use crate::game::{PhysicsEvent, PlayerId, PlayerIndex, Puck, RulesState, ScoreboardValues, Team};
 use crate::gamemode::util::{SpawnPoint, add_players, get_spawnpoint};
 use crate::gamemode::{ExitReason, GameMode, Server, ServerMut, ServerMutParts};
+
+mod commands;
+mod faceoff;
+
+use faceoff::{assign_team_positions, faceoff_spot};
 
 pub const ALLOWED_POSITIONS: [&str; 18] = [
     "C", "LW", "RW", "LD", "RD", "G", "LM", "RM", "LLM", "RRM", "LLD", "RRD", "CM", "CD", "LW2",
@@ -284,13 +288,13 @@ impl BreakState {
 }
 pub struct Match {
     state: MatchState,
-    game_state: MatchGameState,
+    pub(crate) game_state: MatchGameState,
 }
-struct MatchGameState {
-    config: MatchConfiguration,
-    score: (u32, u32),
-    period: u32,
-    time: u32,
+pub(crate) struct MatchGameState {
+    pub(crate) config: MatchConfiguration,
+    pub(crate) score: (u32, u32),
+    pub(crate) period: u32,
+    pub(crate) time: u32,
     replay: Option<(u32, u32, Option<PlayerId>)>,
     preferred_positions: HashMap<PlayerId, &'static str>,
 }
@@ -1016,203 +1020,13 @@ impl Match {
     }
 }
 
-struct FaceoffPositions {
-    center: Vec3,
-    red: HashMap<&'static str, (Vec3, Rot3)>,
-    blue: HashMap<&'static str, (Vec3, Rot3)>,
-}
-
-fn assign_team_positions(
-    players: &[PlayerId],
-    preferred: &HashMap<PlayerId, &'static str>,
-) -> HashMap<PlayerId, &'static str> {
-    let mut available = ALLOWED_POSITIONS.to_vec();
-    let mut assignments = HashMap::new();
-
-    // The first player requesting an available position claims it.
-    for &id in players {
-        if let Some(position) = preferred
-            .get(&id)
-            .copied()
-            .and_then(|position| take_position(&mut available, position))
-        {
-            assignments.insert(id, position);
-        }
-    }
-
-    // Fill the remaining slots, preferring center before the declared position order.
-    for &id in players {
-        assignments.entry(id).or_insert_with(|| {
-            take_position(&mut available, "C")
-                .or_else(|| take_next_position(&mut available))
-                .unwrap_or_else(|| preferred.get(&id).copied().unwrap_or("C"))
-        });
-    }
-
-    // If no one requested center, move the first non-goalie there.
-    if available.contains(&"C") {
-        if let Some(&id) = players
-            .iter()
-            .find(|&&id| assignments[&id] != "G")
-            .or_else(|| players.first())
-        {
-            assignments.insert(id, "C");
-        }
-    }
-
-    assignments
-}
-
-fn take_position(
-    available: &mut Vec<&'static str>,
-    requested: &'static str,
-) -> Option<&'static str> {
-    available
-        .iter()
-        .position(|&position| position == requested)
-        .map(|index| available.remove(index))
-}
-
-fn take_next_position(available: &mut Vec<&'static str>) -> Option<&'static str> {
-    (!available.is_empty()).then(|| available.remove(0))
-}
-
-fn faceoff_spot(
-    rink: &crate::game::Rink,
-    spot: Faceoff,
-    spawn_offset: f32,
-    altitude: f32,
-) -> FaceoffPositions {
-    let width = rink.width;
-    let length = rink.length;
-    let center_x = width / 2.0;
-    let center = match spot {
-        Faceoff::Center => Vec3::new(center_x, 0.0, length / 2.0),
-        Faceoff::Defensive(team, side) => Vec3::new(
-            if side == RinkSide::Lower {
-                center_x - 7.0
-            } else {
-                center_x + 7.0
-            },
-            0.0,
-            if team == Team::Red {
-                length - 10.0
-            } else {
-                10.0
-            },
-        ),
-        Faceoff::Offside(team, side) => Vec3::new(
-            if side == RinkSide::Lower {
-                center_x - 7.0
-            } else {
-                center_x + 7.0
-            },
-            0.0,
-            if team == Team::Red {
-                length - (rink.blue_zone_blue_line.z + 1.5)
-            } else {
-                rink.blue_zone_blue_line.z + 1.5
-            },
-        ),
-    };
-    let make_positions = |team: Team| {
-        let rotation = if team == Team::Red {
-            Rot3::IDENTITY
-        } else {
-            Rot3::from_rotation_y(PI)
-        };
-        let defensive = if team == Team::Red {
-            center.z > length - 11.0
-        } else {
-            center.z < 11.0
-        };
-        let close_left = if team == Team::Red {
-            center.x < 9.0
-        } else {
-            center.x > width - 9.0
-        };
-        let close_right = if team == Team::Red {
-            center.x > width - 9.0
-        } else {
-            center.x < 9.0
-        };
-        let winger_z = 4.0;
-        let middle_z = 7.25;
-        let defense_z = if defensive { 8.25 } else { 10.0 };
-        let far_left = if close_left {
-            (-6.5, 3.0)
-        } else {
-            (-10.0, winger_z)
-        };
-        let far_right = if close_right {
-            (6.5, 3.0)
-        } else {
-            (10.0, winger_z)
-        };
-        let offsets = [
-            ("C", 0.0, spawn_offset),
-            ("LM", -2.0, middle_z),
-            ("RM", 2.0, middle_z),
-            ("LW", -5.0, winger_z),
-            ("RW", 5.0, winger_z),
-            ("LD", -2.0, defense_z),
-            ("RD", 2.0, defense_z),
-            (
-                "LLM",
-                if close_left && defensive { -3.0 } else { -5.0 },
-                middle_z,
-            ),
-            (
-                "RRM",
-                if close_right && defensive { 3.0 } else { 5.0 },
-                middle_z,
-            ),
-            (
-                "LLD",
-                if close_left && defensive { -3.0 } else { -5.0 },
-                defense_z,
-            ),
-            (
-                "RRD",
-                if close_right && defensive { 3.0 } else { 5.0 },
-                defense_z,
-            ),
-            ("CM", 0.0, middle_z),
-            ("CD", 0.0, defense_z),
-            ("LW2", -6.0, winger_z),
-            ("RW2", 6.0, winger_z),
-            ("LLW", far_left.0, far_left.1),
-            ("RRW", far_right.0, far_right.1),
-        ];
-        let mut positions = HashMap::new();
-        for (name, x, z) in offsets {
-            positions.insert(
-                name,
-                (center + rotation * Vec3::new(x, altitude, z), rotation),
-            );
-        }
-        let goalie = if team == Team::Red {
-            Vec3::new(center_x, altitude, length - 5.0)
-        } else {
-            Vec3::new(center_x, altitude, 5.0)
-        };
-        positions.insert("G", (goalie, rotation));
-        positions
-    };
-    FaceoffPositions {
-        center,
-        red: make_positions(Team::Red),
-        blue: make_positions(Team::Blue),
-    }
-}
-
 pub enum StandardMatchState {
     WaitingForGame(WarmupState),
     Game(Match),
 }
 pub struct WarmupState {
-    time: u32,
-    score: (u32, u32),
+    pub(crate) time: u32,
+    pub(crate) score: (u32, u32),
 }
 impl WarmupState {
     fn new(time: u32) -> Self {
@@ -1282,227 +1096,12 @@ impl StandardMatchGameMode {
             preliminary_score,
         ));
     }
-    fn set_config(&mut self, update: impl Fn(&mut MatchConfiguration)) {
+    pub(crate) fn set_config(&mut self, update: impl Fn(&mut MatchConfiguration)) {
         update(&mut self.config);
         if let StandardMatchState::Game(game) = &mut self.state {
             update(&mut game.game_state.config);
         }
     }
-    fn handle_set(&mut self, mut server: ServerMut, arg: &str, player: PlayerId) {
-        let admin_name = {
-            let mut state = server.state_mut();
-            let mut players = state.players_mut();
-            let Some(admin) = players.check_admin_or_deny(player) else {
-                return;
-            };
-            admin.name()
-        };
-        let old_config = self.config;
-        let old_team_max = self.team_max;
-        let old_state_values = match &self.state {
-            StandardMatchState::Game(game) => (
-                game.game_state.score,
-                game.game_state.period,
-                game.game_state.time,
-            ),
-            StandardMatchState::WaitingForGame(warmup) => (warmup.score, 0, warmup.time),
-        };
-        let mut parts = arg.split_whitespace();
-        let Some(setting) = parts.next() else { return };
-        let Some(value) = parts.next() else { return };
-        if matches!(setting, "period" | "clock")
-            && matches!(self.state, StandardMatchState::WaitingForGame(_))
-        {
-            server
-                .state_mut()
-                .players_mut()
-                .add_directed_server_chat_message("No game is currently ongoing", player);
-            return;
-        }
-        match setting {
-            "redscore" | "bluescore" => {
-                if let Ok(score) = value.parse() {
-                    match &mut self.state {
-                        StandardMatchState::WaitingForGame(warmup) => {
-                            if setting == "redscore" {
-                                warmup.score.0 = score;
-                            } else {
-                                warmup.score.1 = score;
-                            }
-                        }
-                        StandardMatchState::Game(game) => {
-                            if setting == "redscore" {
-                                game.game_state.score.0 = score;
-                            } else {
-                                game.game_state.score.1 = score;
-                            }
-                        }
-                    }
-                }
-            }
-            "period" => {
-                if let Ok(period) = value.parse() {
-                    if let StandardMatchState::Game(game) = &mut self.state {
-                        game.game_state.period = period;
-                    }
-                }
-            }
-            "periodnum" => {
-                if let Ok(periods) = value.parse() {
-                    self.set_config(|config| config.periods = periods);
-                }
-            }
-            "clock" => {
-                if let Some(time) = parse_clock(value) {
-                    if let StandardMatchState::Game(game) = &mut self.state {
-                        game.game_state.time = time;
-                    }
-                }
-            }
-            "icing" => match value {
-                "on" | "touch" => self.set_config(|c| c.icing = IcingConfiguration::Touch),
-                "notouch" => self.set_config(|c| c.icing = IcingConfiguration::NoTouch),
-                "off" => self.set_config(|c| c.icing = IcingConfiguration::Off),
-                _ => {}
-            },
-            "offside" => match value {
-                "on" | "delayed" => self.set_config(|c| c.offside = OffsideConfiguration::Delayed),
-                "imm" | "immediate" => {
-                    self.set_config(|c| c.offside = OffsideConfiguration::Immediate)
-                }
-                "off" => self.set_config(|c| c.offside = OffsideConfiguration::Off),
-                _ => {}
-            },
-            "twolinepass" => match value {
-                "off" => self.set_config(|c| c.twoline_pass = TwoLinePassConfiguration::Off),
-                "on" => self.set_config(|c| c.twoline_pass = TwoLinePassConfiguration::On),
-                "forward" => {
-                    self.set_config(|c| c.twoline_pass = TwoLinePassConfiguration::Forward)
-                }
-                "double" | "both" => {
-                    self.set_config(|c| c.twoline_pass = TwoLinePassConfiguration::Double)
-                }
-                "blue" | "three" | "threeline" => {
-                    self.set_config(|c| c.twoline_pass = TwoLinePassConfiguration::ThreeLine)
-                }
-                _ => {}
-            },
-            "offsideline" => match value {
-                "blue" => {
-                    self.set_config(|c| c.offside_line = OffsideLineConfiguration::OffensiveBlue)
-                }
-                "center" => self.set_config(|c| c.offside_line = OffsideLineConfiguration::Center),
-                _ => {}
-            },
-            "mercy" => {
-                if let Ok(goals) = value.parse() {
-                    self.set_config(|c| c.mercy = goals);
-                }
-            }
-            "first" => {
-                if let Ok(goals) = value.parse() {
-                    self.set_config(|c| c.first_to = goals);
-                }
-            }
-            "goalreplay" => match value {
-                "on" => self.set_config(|c| c.goal_replay = true),
-                "off" => self.set_config(|c| c.goal_replay = false),
-                _ => {}
-            },
-            "spawnoffset" => {
-                if let Ok(offset) = value.parse() {
-                    self.set_config(|c| c.spawn_point_offset = offset);
-                }
-            }
-            "spawnplayeraltitude" => {
-                if let Ok(altitude) = value.parse() {
-                    self.set_config(|c| c.spawn_player_altitude = altitude);
-                }
-            }
-            "spawnpuckaltitude" => {
-                if let Ok(altitude) = value.parse() {
-                    self.set_config(|c| c.spawn_puck_altitude = altitude);
-                }
-            }
-            "spawnplayerkeepstick" => match value {
-                "on" | "true" => self.set_config(|c| c.spawn_keep_stick_position = true),
-                "off" | "false" => self.set_config(|c| c.spawn_keep_stick_position = false),
-                _ => {}
-            },
-            "teamsize" => {
-                if let Ok(size) = value.parse() {
-                    if (1..=15).contains(&size) {
-                        self.team_max = size;
-                    }
-                }
-            }
-            _ => {}
-        }
-        let new_state_values = match &self.state {
-            StandardMatchState::Game(game) => (
-                game.game_state.score,
-                game.game_state.period,
-                game.game_state.time,
-            ),
-            StandardMatchState::WaitingForGame(warmup) => (warmup.score, 0, warmup.time),
-        };
-        if self.config != old_config
-            || self.team_max != old_team_max
-            || new_state_values != old_state_values
-        {
-            let message = match (setting, value) {
-                ("redscore", _) => format!("Red score changed to {value}"),
-                ("bluescore", _) => format!("Blue score changed to {value}"),
-                ("period", _) => format!("Period set to {value}"),
-                ("periodnum", _) => format!("Number of periods set to {value}"),
-                ("clock", _) => format!("Clock set to {value}"),
-                ("icing", "on" | "touch") => "Touch icing enabled".to_owned(),
-                ("icing", "notouch") => "No-touch icing enabled".to_owned(),
-                ("icing", "off") => "Icing disabled".to_owned(),
-                ("offside", "on" | "delayed") => "Offside enabled".to_owned(),
-                ("offside", "imm" | "immediate") => "Immediate offside enabled".to_owned(),
-                ("offside", "off") => "Offside disabled".to_owned(),
-                ("twolinepass", "off") => "Two-line pass rule disabled".to_owned(),
-                ("twolinepass", "on") => "Regular two-line pass rule enabled".to_owned(),
-                ("twolinepass", "forward") => "Forward two-line pass rule enabled".to_owned(),
-                ("twolinepass", "double" | "both") => {
-                    "Regular and forward two-line pass rules enabled".to_owned()
-                }
-                ("twolinepass", "blue" | "three" | "threeline") => {
-                    "Three-line pass rule enabled".to_owned()
-                }
-                ("offsideline", "blue") => "Blue line set as offside line".to_owned(),
-                ("offsideline", "center") => "Center line set as offside line".to_owned(),
-                ("mercy", "0" | "off") => "Mercy rule disabled".to_owned(),
-                ("mercy", _) => format!("Mercy rule set to {value} goals"),
-                ("first", "0" | "off") => "First-to-goals rule disabled".to_owned(),
-                ("first", _) => format!("First-to-goals rule set to {value} goals"),
-                ("goalreplay", "on") => "Goal replays enabled".to_owned(),
-                ("goalreplay", "off") => "Goal replays disabled".to_owned(),
-                ("teamsize", _) => format!("Team size set to {value}"),
-                _ => format!("{setting} changed to {value}"),
-            };
-            server
-                .state_mut()
-                .players_mut()
-                .add_server_chat_message(format!("{message} by {admin_name}"));
-        }
-    }
-}
-
-fn parse_clock(value: &str) -> Option<u32> {
-    let (minutes, seconds): (u32, &str) = match value.split_once(':') {
-        Some((minutes, seconds)) => (minutes.parse::<u32>().ok()?, seconds),
-        None => (0, value),
-    };
-    let (seconds, centiseconds): (u32, u32) = match seconds.split_once('.') {
-        Some((seconds, centiseconds)) => (
-            seconds.parse::<u32>().ok()?,
-            centiseconds.parse::<u32>().ok()? * if centiseconds.len() == 1 { 10 } else { 1 },
-        ),
-        None => (seconds.parse::<u32>().ok()?, 0),
-    };
-    Some(minutes * 6000 + seconds * 100 + centiseconds)
 }
 impl GameMode for StandardMatchGameMode {
     fn init(&mut self, mut server: ServerMut) {

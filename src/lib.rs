@@ -1,16 +1,12 @@
-mod admin_commands;
-
 pub mod gamemode;
 
-pub mod ban;
 pub mod game;
 pub mod physics;
-mod players;
 mod protocol;
-pub mod record;
 mod server;
 
-pub use server::run_server;
+pub(crate) use server::players;
+pub use server::{ban, recording as record, run_server};
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum ReplayRecording {

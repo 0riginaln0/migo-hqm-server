@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 
@@ -7,7 +6,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arraydeque::{ArrayDeque, Wrapping};
 use bytes::{BufMut, BytesMut};
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
@@ -22,26 +20,37 @@ use tracing::{info, warn};
 
 use crate::gamemode::{ExitReason, GameMode};
 
-use crate::ban::{BanCheck, BanCheckResponse};
+use self::ban::{BanCheck, BanCheckResponse};
+use self::recording::RecordingSaveMethod;
 use crate::game::{
     PhysicsConfiguration, PlayerId, PlayerIndex, PlayerInput, Puck, Rink, ScoreboardValues,
     SkaterHand, SkaterObject, Team,
-};
-pub(crate) use crate::players::{
-    HQMMessage, MessageRecording, MessageRetention, MuteStatus, PlayerListExt, PlayerSlots,
-    ServerPlayerData, ServerPlayersAndMessages,
 };
 use crate::protocol::{
     HQMClientToServerMessage, HQMMasterServerRegistration, HQMMessageCodec, HQMMessageWriter,
     HQMServerToClientMessage, HQMServerUpdate, ObjectPacket, write_message, write_objects,
 };
-use crate::record::RecordingSaveMethod;
 use crate::{ReplayRecording, ServerConfiguration};
-
-const PACKET_HISTORY_LEN: usize = 192;
-const NO_PACKET_SEQUENCE: u32 = u32::MAX;
+pub(crate) use players::{
+    HQMMessage, MessageRecording, MessageRetention, MuteStatus, PlayerListExt, PlayerSlots,
+    ServerPlayerData, ServerPlayersAndMessages,
+};
 
 type HQMFramedSocket = UdpFramed<HQMMessageCodec, Arc<UdpSocket>>;
+
+mod admin_commands;
+pub mod ban;
+pub(crate) mod players;
+pub mod recording;
+mod replay;
+mod replication;
+
+pub use replay::HQMTickHistory;
+use replication::ReplicationState;
+pub(crate) use replication::{PacketHistory, PacketNumber};
+
+#[cfg(test)]
+use replication::PACKET_HISTORY_LEN;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObjectSlot(usize);
@@ -105,215 +114,6 @@ impl ObjectExt for [Option<GameObject>] {
         } else {
             None
         }
-    }
-}
-
-pub struct HQMTickHistory {
-    current_step: u32,
-    pending_replay: VecDeque<(Option<PlayerId>, ReplayTick)>,
-    retained_ticks: VecDeque<ReplayTick>,
-    history_capacity: usize,
-}
-
-impl HQMTickHistory {
-    fn new() -> Self {
-        Self {
-            current_step: u32::MAX,
-            pending_replay: Default::default(),
-            retained_ticks: Default::default(),
-            history_capacity: 0,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.pending_replay.clear();
-        self.retained_ticks.clear();
-        self.current_step = u32::MAX;
-    }
-
-    pub fn is_in_replay(&self) -> bool {
-        !self.pending_replay.is_empty()
-    }
-
-    pub(crate) fn game_step(&self) -> u32 {
-        self.current_step
-    }
-
-    pub(crate) fn set_history_capacity(&mut self, history_capacity: usize) {
-        self.history_capacity = history_capacity;
-        self.trim_history();
-    }
-
-    fn advance_step(&mut self) {
-        self.current_step = self.current_step.wrapping_add(1);
-    }
-
-    fn record_tick(&mut self, packets: [ObjectPacket; 32]) {
-        if self.history_capacity == 0 {
-            self.retained_ticks.clear();
-            return;
-        }
-
-        self.retained_ticks.truncate(self.history_capacity - 1);
-        self.retained_ticks.push_front(ReplayTick {
-            game_step: self.current_step,
-            packets,
-        });
-    }
-
-    fn trim_history(&mut self) {
-        self.retained_ticks.truncate(self.history_capacity);
-    }
-
-    pub fn add_replay_to_queue(
-        &mut self,
-        start_step: u32,
-        end_step: u32,
-        force_view: Option<PlayerId>,
-    ) {
-        if start_step > end_step {
-            warn!("start_step must be less than or equal to end_step");
-            return;
-        }
-
-        let data = self
-            .retained_ticks
-            .iter()
-            .rev()
-            .filter(|tick| (start_step..=end_step).contains(&tick.game_step))
-            .map(|x| (force_view, x.clone()));
-        self.pending_replay.extend(data);
-    }
-
-    fn pop_replay_tick(&mut self) -> Option<(Option<PlayerId>, ReplayTick)> {
-        self.pending_replay.pop_front()
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PacketNumber(u32);
-
-impl PacketNumber {
-    pub(crate) fn from_wire(value: u32) -> Option<Self> {
-        (value != NO_PACKET_SEQUENCE).then_some(Self(value))
-    }
-
-    pub(crate) fn to_wire(self) -> u32 {
-        self.0
-    }
-
-    fn next(self) -> Self {
-        let next = self.0.wrapping_add(1);
-        if next == NO_PACKET_SEQUENCE {
-            Self(0)
-        } else {
-            Self(next)
-        }
-    }
-
-    fn is_newer_than(self, other: Self) -> bool {
-        let distance = self.0.wrapping_sub(other.0);
-        distance != 0 && distance < u32::MAX / 2
-    }
-}
-
-struct ReplicationFrame {
-    sequence: PacketNumber,
-    objects: [ObjectPacket; 32],
-    created_at: Instant,
-}
-
-pub(crate) struct PacketHistory {
-    latest: Option<PacketNumber>,
-    frames: Box<ArrayDeque<ReplicationFrame, PACKET_HISTORY_LEN, Wrapping>>,
-}
-
-impl PacketHistory {
-    fn new() -> Self {
-        Self {
-            latest: None,
-            frames: Box::new(ArrayDeque::new()),
-        }
-    }
-
-    fn clear(&mut self) {
-        self.latest = None;
-        self.frames.clear();
-    }
-
-    fn push(&mut self, objects: [ObjectPacket; 32]) -> PacketNumber {
-        let sequence = self
-            .latest
-            .map(PacketNumber::next)
-            .unwrap_or(PacketNumber(0));
-        self.frames.push_front(ReplicationFrame {
-            sequence,
-            objects,
-            created_at: Instant::now(),
-        });
-        self.latest = Some(sequence);
-        sequence
-    }
-
-    pub(crate) fn latest_sequence(&self) -> PacketNumber {
-        self.latest
-            .expect("packet history must have a frame before serialization")
-    }
-
-    pub(crate) fn current_objects(&self) -> &[ObjectPacket; 32] {
-        &self
-            .frames
-            .front()
-            .expect("packet history must have a frame before serialization")
-            .objects
-    }
-
-    pub(crate) fn objects_for(&self, sequence: PacketNumber) -> Option<&[ObjectPacket; 32]> {
-        let latest = self.latest?;
-        let age = latest.0.wrapping_sub(sequence.0) as usize;
-        self.frames
-            .get(age)
-            .filter(|frame| frame.sequence == sequence)
-            .map(|frame| &frame.objects)
-    }
-
-    pub(crate) fn baseline_objects_for(
-        &self,
-        sequence: PacketNumber,
-    ) -> Option<&[ObjectPacket; 32]> {
-        if self.latest == Some(sequence) {
-            None
-        } else {
-            self.objects_for(sequence)
-        }
-    }
-
-    fn sent_at(&self, sequence: PacketNumber) -> Option<Instant> {
-        let latest = self.latest?;
-        let age = latest.0.wrapping_sub(sequence.0) as usize;
-        self.frames
-            .get(age)
-            .filter(|frame| frame.sequence == sequence)
-            .map(|frame| frame.created_at)
-    }
-}
-
-struct ReplicationState {
-    last_scoreboard: Option<ScoreboardValues>,
-    history: PacketHistory,
-}
-
-impl ReplicationState {
-    fn new() -> Self {
-        Self {
-            last_scoreboard: None,
-            history: PacketHistory::new(),
-        }
-    }
-
-    fn new_game(&mut self) {
-        self.last_scoreboard = None;
-        self.history.clear();
     }
 }
 
@@ -1382,12 +1182,6 @@ struct TickOutput {
     game_step: u32,
     forced_view: Option<PlayerIndex>,
     scoreboard: ScoreboardValues,
-}
-
-#[derive(Clone, Debug)]
-struct ReplayTick {
-    game_step: u32,
-    packets: [ObjectPacket; 32],
 }
 
 #[derive(Debug, PartialEq, Eq)]

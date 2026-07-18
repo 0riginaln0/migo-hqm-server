@@ -1,0 +1,96 @@
+//! Replay tick retention and playback queue management.
+
+use std::collections::VecDeque;
+
+use tracing::warn;
+
+use crate::game::PlayerId;
+use crate::protocol::ObjectPacket;
+
+#[derive(Clone, Debug)]
+pub(super) struct ReplayTick {
+    pub(super) game_step: u32,
+    pub(super) packets: [ObjectPacket; 32],
+}
+
+pub struct HQMTickHistory {
+    current_step: u32,
+    pending_replay: VecDeque<(Option<PlayerId>, ReplayTick)>,
+    retained_ticks: VecDeque<ReplayTick>,
+    history_capacity: usize,
+}
+
+impl HQMTickHistory {
+    pub(crate) fn new() -> Self {
+        Self {
+            current_step: u32::MAX,
+            pending_replay: Default::default(),
+            retained_ticks: Default::default(),
+            history_capacity: 0,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.pending_replay.clear();
+        self.retained_ticks.clear();
+        self.current_step = u32::MAX;
+    }
+
+    pub fn is_in_replay(&self) -> bool {
+        !self.pending_replay.is_empty()
+    }
+
+    pub(crate) fn game_step(&self) -> u32 {
+        self.current_step
+    }
+
+    pub(crate) fn set_history_capacity(&mut self, history_capacity: usize) {
+        self.history_capacity = history_capacity;
+        self.trim_history();
+    }
+
+    pub(crate) fn advance_step(&mut self) {
+        self.current_step = self.current_step.wrapping_add(1);
+    }
+
+    pub(crate) fn record_tick(&mut self, packets: [ObjectPacket; 32]) {
+        if self.history_capacity == 0 {
+            self.retained_ticks.clear();
+            return;
+        }
+
+        self.retained_ticks.truncate(self.history_capacity - 1);
+        self.retained_ticks.push_front(ReplayTick {
+            game_step: self.current_step,
+            packets,
+        });
+    }
+
+    fn trim_history(&mut self) {
+        self.retained_ticks.truncate(self.history_capacity);
+    }
+
+    pub fn add_replay_to_queue(
+        &mut self,
+        start_step: u32,
+        end_step: u32,
+        force_view: Option<PlayerId>,
+    ) {
+        if start_step > end_step {
+            warn!("start_step must be less than or equal to end_step");
+            return;
+        }
+
+        let data = self
+            .retained_ticks
+            .iter()
+            .rev()
+            .filter(|tick| (start_step..=end_step).contains(&tick.game_step))
+            .map(|tick| (force_view, tick.clone()));
+        self.pending_replay.extend(data);
+    }
+
+    pub(super) fn pop_replay_tick(&mut self) -> Option<(Option<PlayerId>, ReplayTick)> {
+        self.pending_replay.pop_front()
+    }
+}

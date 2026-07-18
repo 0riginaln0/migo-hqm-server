@@ -3,7 +3,7 @@ name = "migo-hqm-server"
 version = "2.1.0"
 authors = ["John Eriksson <john.eriksson.16@gmail.com>"]
 edition = "2024"
-build = "src/build.rs"
+build = "build.rs"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
