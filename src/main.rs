@@ -1,10 +1,6 @@
+use std::env;
 use std::path::{Path, PathBuf};
 
-// INI Crate For configuration
-use ini::Ini;
-use std::env;
-
-use ini::Properties;
 use migo_hqm_server::ban::{BanCheck, FileBanCheck, InMemoryBanCheck};
 use migo_hqm_server::game::PhysicsConfiguration;
 use migo_hqm_server::gamemode::shootout::{ShootoutGameConfiguration, ShootoutGameMode};
@@ -18,15 +14,89 @@ use migo_hqm_server::record::{
     RecordingSaveMethod, RecordingSaveToFile, RecordingSendToHttpEndpoint,
 };
 use migo_hqm_server::{ReplayRecording, ServerConfiguration};
+use serde::Deserialize;
 
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum HQMServerMode {
     Match,
+    #[serde(rename = "warmup")]
     PermanentWarmup,
     Shootout,
 }
 
-fn is_true(s: &str) -> bool {
-    s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("on")
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ReplayConfiguration {
+    Off,
+    On,
+    Standby,
+}
+
+#[derive(Deserialize)]
+struct TomlConfiguration {
+    server: ServerSection,
+    #[serde(default)]
+    game: GameSection,
+    #[serde(default)]
+    physics: PhysicsSection,
+}
+
+#[derive(Deserialize)]
+struct ServerSection {
+    name: String,
+    port: u16,
+    public: bool,
+    public_address: Option<String>,
+    player_max: usize,
+    team_max: usize,
+    password: Option<String>,
+    mode: Option<HQMServerMode>,
+    replays: Option<ReplayConfiguration>,
+    log_name: Option<String>,
+    welcome: Option<String>,
+    replay_endpoint: Option<String>,
+    replay_directory: Option<PathBuf>,
+    service: Option<String>,
+    ban_file: Option<PathBuf>,
+}
+
+#[derive(Default, Deserialize)]
+struct GameSection {
+    periods: Option<u32>,
+    time_period: Option<u32>,
+    time_warmup: Option<u32>,
+    time_break: Option<u32>,
+    time_intermission: Option<u32>,
+    warmup_pucks: Option<usize>,
+    attempts: Option<u32>,
+    mercy: Option<u32>,
+    first: Option<u32>,
+    icing: Option<String>,
+    offside: Option<String>,
+    offsideline: Option<String>,
+    twolinepass: Option<String>,
+    spawn: Option<String>,
+    spawn_offset: Option<f32>,
+    spawn_player_altitude: Option<f32>,
+    spawn_puck_altitude: Option<f32>,
+    spawn_player_keep_stick: Option<bool>,
+    use_mph: Option<bool>,
+    goal_replay: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+struct PhysicsSection {
+    limit_jump_speed: Option<bool>,
+    gravity: Option<f32>,
+    player_acceleration: Option<f32>,
+    player_deceleration: Option<f32>,
+    max_player_speed: Option<f32>,
+    max_player_shift_speed: Option<f32>,
+    puck_rink_friction: Option<f32>,
+    player_turning: Option<f32>,
+    player_shift_turning: Option<f32>,
+    player_shift_acceleration: Option<f32>,
 }
 
 #[tokio::main]
@@ -36,64 +106,44 @@ async fn main() -> anyhow::Result<()> {
     let config_path = if args.len() > 1 {
         &args[1]
     } else {
-        "config.ini"
+        "config.toml"
     };
 
     // Load configuration (if exists)
     if Path::new(config_path).exists() {
-        // Load configuration file
-        let conf = Ini::load_from_file(config_path).unwrap();
+        let config_text = std::fs::read_to_string(config_path)?;
+        let conf: TomlConfiguration = toml::from_str(&config_text)?;
 
         // Server information
-        let server_section = conf.section(Some("Server")).unwrap();
-        let server_name = server_section
-            .get("name")
-            .unwrap()
-            .parse::<String>()
-            .unwrap();
-        let server_port = server_section.get("port").unwrap().parse::<u16>().unwrap();
-        let server_public = is_true(server_section.get("public").unwrap());
-        let public_address = if server_public {
-            Some(
-                server_section
-                    .get("public_address")
-                    .unwrap_or("https://sam2.github.io/HQMMasterServerEndpoint/"),
-            )
-        } else {
-            None
-        };
-        let server_player_max = server_section
-            .get("player_max")
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        let server_team_max = server_section
-            .get("team_max")
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
+        let server_section = conf.server;
+        let server_name = server_section.name;
+        let server_port = server_section.port;
+        let server_public = server_section.public;
+        let public_address =
+            if server_public {
+                Some(server_section.public_address.unwrap_or_else(|| {
+                    "https://sam2.github.io/HQMMasterServerEndpoint/".to_owned()
+                }))
+            } else {
+                None
+            };
+        let server_player_max = server_section.player_max;
+        let server_team_max = server_section.team_max;
 
-        let server_password = server_section.get("password").map(|x| x.to_string());
-        let mode = server_section
-            .get("mode")
-            .map_or(HQMServerMode::Match, |x| match x {
-                "warmup" => HQMServerMode::PermanentWarmup,
-                "match" => HQMServerMode::Match,
-                "shootout" => HQMServerMode::Shootout,
-                _ => HQMServerMode::Match,
-            });
+        let server_password = server_section.password;
+        let mode = server_section.mode.unwrap_or(HQMServerMode::Match);
 
-        let replays_enabled = match server_section.get("replays") {
-            Some(s) if is_true(s) => ReplayRecording::On,
-            Some(s) if s.eq_ignore_ascii_case("standby") => ReplayRecording::Standby,
-            _ => ReplayRecording::Off,
+        let replays_enabled = match server_section.replays.unwrap_or(ReplayConfiguration::Off) {
+            ReplayConfiguration::Off => ReplayRecording::Off,
+            ReplayConfiguration::On => ReplayRecording::On,
+            ReplayConfiguration::Standby => ReplayRecording::Standby,
         };
 
         let log_name = server_section
-            .get("log_name")
-            .map_or(format!("{server_name}.log"), String::from);
+            .log_name
+            .unwrap_or_else(|| format!("{server_name}.log"));
 
-        let welcome = server_section.get("welcome").unwrap_or("");
+        let welcome = server_section.welcome.unwrap_or_default();
 
         let welcome_str = welcome
             .lines()
@@ -102,34 +152,21 @@ async fn main() -> anyhow::Result<()> {
             .collect();
 
         let replay_saving: Box<dyn RecordingSaveMethod> =
-            if let Some(url) = server_section.get("replay_endpoint") {
-                Box::new(RecordingSendToHttpEndpoint::new(url.to_string()))
+            if let Some(url) = server_section.replay_endpoint {
+                Box::new(RecordingSendToHttpEndpoint::new(url))
             } else {
-                let dir = if let Some(path) = server_section.get("replay_directory") {
-                    PathBuf::from(path)
-                } else {
-                    PathBuf::from("replays")
-                };
+                let dir = server_section
+                    .replay_directory
+                    .unwrap_or_else(|| PathBuf::from("replays"));
                 Box::new(RecordingSaveToFile::new(dir))
             };
 
-        fn get_optional<U, F: FnOnce(&str) -> U>(
-            section: Option<&Properties>,
-            property: &str,
-            default: U,
-            f: F,
-        ) -> U {
-            section.and_then(|x| x.get(property)).map_or(default, f)
-        }
+        let server_service = server_section.service;
 
-        let server_service = server_section.get("service").map(|x| x.to_owned());
-
-        let ban_file = server_section.get("ban_file").map(|x| x.to_owned());
+        let ban_file = server_section.ban_file;
 
         // Game
-        let game_section = conf.section(Some("Game"));
-
-        let limit_jump_speed = get_optional(game_section, "limit_jump_speed", false, is_true);
+        let game_section = conf.game;
 
         let config = ServerConfiguration {
             welcome: welcome_str,
@@ -141,45 +178,20 @@ async fn main() -> anyhow::Result<()> {
         };
 
         // Physics
-        let physics_section = conf.section(Some("Physics"));
-        let gravity = get_optional(physics_section, "gravity", 0.000680555, |x| {
-            x.parse::<f32>().unwrap() / 10000.0
-        });
-        let player_acceleration =
-            get_optional(physics_section, "player_acceleration", 0.000208333, |x| {
-                x.parse::<f32>().unwrap() / 10000.0
-            });
-        let player_deceleration =
-            get_optional(physics_section, "player_deceleration", 0.000555555, |x| {
-                x.parse::<f32>().unwrap() / 10000.0
-            });
-        let max_player_speed = get_optional(physics_section, "max_player_speed", 0.05, |x| {
-            x.parse::<f32>().unwrap() / 100.0
-        });
+        let physics_section = conf.physics;
+        let limit_jump_speed = physics_section.limit_jump_speed.unwrap_or(false);
+        let gravity = physics_section.gravity.unwrap_or(6.80555) / 10000.0;
+        let player_acceleration = physics_section.player_acceleration.unwrap_or(2.08333) / 10000.0;
+        let player_deceleration = physics_section.player_deceleration.unwrap_or(5.55555) / 10000.0;
+        let max_player_speed = physics_section.max_player_speed.unwrap_or(5.0) / 100.0;
         let max_player_shift_speed =
-            get_optional(physics_section, "max_player_shift_speed", 0.0333333, |x| {
-                x.parse::<f32>().unwrap() / 100.0
-            });
-
-        let puck_rink_friction = get_optional(physics_section, "puck_rink_friction", 0.05, |x| {
-            x.parse::<f32>().unwrap()
-        });
-        let player_turning = get_optional(physics_section, "player_turning", 0.00041666666, |x| {
-            x.parse::<f32>().unwrap() / 10000.0
-        });
-        let player_shift_turning = get_optional(
-            physics_section,
-            "player_shift_turning",
-            0.00038888888,
-            |x| x.parse::<f32>().unwrap() / 10000.0,
-        );
-
-        let player_shift_acceleration = get_optional(
-            physics_section,
-            "player_shift_acceleration",
-            0.00027777,
-            |x| x.parse::<f32>().unwrap() / 10000.0,
-        );
+            physics_section.max_player_shift_speed.unwrap_or(3.33333) / 100.0;
+        let puck_rink_friction = physics_section.puck_rink_friction.unwrap_or(0.05);
+        let player_turning = physics_section.player_turning.unwrap_or(4.1666666) / 10000.0;
+        let player_shift_turning =
+            physics_section.player_shift_turning.unwrap_or(3.88888) / 10000.0;
+        let player_shift_acceleration =
+            physics_section.player_shift_acceleration.unwrap_or(2.7777) / 10000.0;
 
         let physics_config = PhysicsConfiguration {
             gravity,
@@ -204,109 +216,67 @@ async fn main() -> anyhow::Result<()> {
             .init();
 
         let ban: Box<dyn BanCheck> = if let Some(ban_file) = ban_file.as_deref() {
-            Box::new(FileBanCheck::new(ban_file.to_string().into()).await?)
+            Box::new(FileBanCheck::new(ban_file.to_owned()).await?)
         } else {
             Box::new(InMemoryBanCheck::new())
         };
 
         match mode {
             HQMServerMode::Match => {
-                let periods =
-                    get_optional(game_section, "periods", 3, |x| x.parse::<u32>().unwrap());
+                let periods = game_section.periods.unwrap_or(3);
 
-                let rules_time_period = get_optional(game_section, "time_period", 300, |x| {
-                    x.parse::<u32>().unwrap()
-                });
-                let rules_time_warmup = get_optional(game_section, "time_warmup", 300, |x| {
-                    x.parse::<u32>().unwrap()
-                });
-                let rule_time_break = get_optional(game_section, "time_break", 10, |x| {
-                    x.parse::<u32>().unwrap()
-                });
-                let rule_time_intermission =
-                    get_optional(game_section, "time_intermission", 20, |x| {
-                        x.parse::<u32>().unwrap()
-                    });
-                let warmup_pucks = get_optional(game_section, "warmup_pucks", 1, |x| {
-                    x.parse::<usize>().unwrap()
-                });
+                let rules_time_period = game_section.time_period.unwrap_or(300);
+                let rules_time_warmup = game_section.time_warmup.unwrap_or(300);
+                let rule_time_break = game_section.time_break.unwrap_or(10);
+                let rule_time_intermission = game_section.time_intermission.unwrap_or(20);
+                let warmup_pucks = game_section.warmup_pucks.unwrap_or(1);
 
-                let mercy = get_optional(game_section, "mercy", 0, |x| x.parse::<u32>().unwrap());
-                let first_to =
-                    get_optional(game_section, "first", 0, |x| x.parse::<u32>().unwrap());
+                let mercy = game_section.mercy.unwrap_or(0);
+                let first_to = game_section.first.unwrap_or(0);
 
-                let icing = get_optional(
-                    game_section,
-                    "icing",
-                    IcingConfiguration::Off,
-                    |x| match x {
-                        "on" | "touch" => IcingConfiguration::Touch,
-                        "notouch" => IcingConfiguration::NoTouch,
-                        _ => IcingConfiguration::Off,
-                    },
-                );
+                let icing = match game_section.icing.as_deref().unwrap_or("off") {
+                    "on" | "touch" => IcingConfiguration::Touch,
+                    "notouch" => IcingConfiguration::NoTouch,
+                    _ => IcingConfiguration::Off,
+                };
 
-                let offside = get_optional(
-                    game_section,
-                    "offside",
-                    OffsideConfiguration::Off,
-                    |x| match x {
-                        "on" | "delayed" => OffsideConfiguration::Delayed,
-                        "immediate" | "imm" => OffsideConfiguration::Immediate,
-                        _ => OffsideConfiguration::Off,
-                    },
-                );
+                let offside = match game_section.offside.as_deref().unwrap_or("off") {
+                    "on" | "delayed" => OffsideConfiguration::Delayed,
+                    "immediate" | "imm" => OffsideConfiguration::Immediate,
+                    _ => OffsideConfiguration::Off,
+                };
 
-                let offside_line = get_optional(
-                    game_section,
-                    "offsideline",
-                    OffsideLineConfiguration::OffensiveBlue,
-                    |x| match x {
-                        "blue" => OffsideLineConfiguration::OffensiveBlue,
-                        "center" => OffsideLineConfiguration::Center,
-                        _ => OffsideLineConfiguration::OffensiveBlue,
-                    },
-                );
+                let offside_line = match game_section.offsideline.as_deref().unwrap_or("blue") {
+                    "blue" => OffsideLineConfiguration::OffensiveBlue,
+                    "center" => OffsideLineConfiguration::Center,
+                    _ => OffsideLineConfiguration::OffensiveBlue,
+                };
 
-                let twoline_pass = get_optional(
-                    game_section,
-                    "twolinepass",
-                    TwoLinePassConfiguration::Off,
-                    |x| match x {
-                        "on" => TwoLinePassConfiguration::On,
-                        "forward" => TwoLinePassConfiguration::Forward,
-                        "double" | "both" => TwoLinePassConfiguration::Double,
-                        "blue" | "three" | "threeline" => TwoLinePassConfiguration::ThreeLine,
-                        _ => TwoLinePassConfiguration::Off,
-                    },
-                );
+                let twoline_pass = match game_section.twolinepass.as_deref().unwrap_or("off") {
+                    "on" => TwoLinePassConfiguration::On,
+                    "forward" => TwoLinePassConfiguration::Forward,
+                    "double" | "both" => TwoLinePassConfiguration::Double,
+                    "blue" | "three" | "threeline" => TwoLinePassConfiguration::ThreeLine,
+                    _ => TwoLinePassConfiguration::Off,
+                };
 
-                let spawn_point =
-                    get_optional(game_section, "spawn", SpawnPoint::Center, |x| match x {
-                        "bench" => SpawnPoint::Bench,
-                        _ => SpawnPoint::Center,
-                    });
+                let spawn_point = match game_section.spawn.as_deref().unwrap_or("center") {
+                    "bench" => SpawnPoint::Bench,
+                    _ => SpawnPoint::Center,
+                };
 
-                let spawn_point_offset = get_optional(game_section, "spawn_offset", 2.75f32, |x| {
-                    x.parse::<f32>().unwrap()
-                });
+                let spawn_point_offset = game_section.spawn_offset.unwrap_or(2.75);
 
-                let spawn_player_altitude =
-                    get_optional(game_section, "spawn_player_altitude", 1.5f32, |x| {
-                        x.parse::<f32>().unwrap()
-                    });
+                let spawn_player_altitude = game_section.spawn_player_altitude.unwrap_or(1.5);
 
-                let spawn_puck_altitude =
-                    get_optional(game_section, "spawn_puck_altitude", 1.5f32, |x| {
-                        x.parse::<f32>().unwrap()
-                    });
+                let spawn_puck_altitude = game_section.spawn_puck_altitude.unwrap_or(1.5);
 
                 let spawn_keep_stick_position =
-                    get_optional(game_section, "spawn_player_keep_stick", false, is_true);
+                    game_section.spawn_player_keep_stick.unwrap_or(false);
 
-                let use_mph = get_optional(game_section, "use_mph", false, is_true);
+                let use_mph = game_section.use_mph.unwrap_or(false);
 
-                let goal_replay = get_optional(game_section, "goal_replay", false, is_true);
+                let goal_replay = game_section.goal_replay.unwrap_or(false);
 
                 let match_config = MatchConfiguration {
                     time_period: rules_time_period,
@@ -331,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
 
                 migo_hqm_server::run_server(
                     server_port,
-                    public_address,
+                    public_address.as_deref(),
                     config,
                     physics_config,
                     ban,
@@ -341,19 +311,16 @@ async fn main() -> anyhow::Result<()> {
                 .await?
             }
             HQMServerMode::PermanentWarmup => {
-                let warmup_pucks = get_optional(game_section, "warmup_pucks", 1, |x| {
-                    x.parse::<usize>().unwrap()
-                });
+                let warmup_pucks = game_section.warmup_pucks.unwrap_or(1);
 
-                let spawn_point =
-                    get_optional(game_section, "spawn", SpawnPoint::Center, |x| match x {
-                        "bench" => SpawnPoint::Bench,
-                        _ => SpawnPoint::Center,
-                    });
+                let spawn_point = match game_section.spawn.as_deref().unwrap_or("center") {
+                    "bench" => SpawnPoint::Bench,
+                    _ => SpawnPoint::Center,
+                };
 
                 migo_hqm_server::run_server(
                     server_port,
-                    public_address,
+                    public_address.as_deref(),
                     config,
                     physics_config,
                     ban,
@@ -363,13 +330,12 @@ async fn main() -> anyhow::Result<()> {
                 .await?
             }
             HQMServerMode::Shootout => {
-                let attempts =
-                    get_optional(game_section, "attempts", 5, |x| x.parse::<u32>().unwrap());
+                let attempts = game_section.attempts.unwrap_or(5);
                 let shootout_config = ShootoutGameConfiguration { attempts };
 
                 migo_hqm_server::run_server(
                     server_port,
-                    public_address,
+                    public_address.as_deref(),
                     config,
                     physics_config,
                     ban,

@@ -11,7 +11,8 @@ glam = "0.32"
 glamx = "0.2"
 tokio = { version = "1", features = ["net", "time", "macros", "rt-multi-thread", "sync", "fs", "parking_lot"] }
 tokio-util = { version = "0.7", features = ["codec", "net"] }
-rust-ini = "0.21.0" # INI For configuration
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 bytes = "1.6"
 reqwest = { version = "0.12", default-features=false, features = ["multipart", "rustls-tls"] }
 tracing = "0.1"

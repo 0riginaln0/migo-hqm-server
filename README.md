@@ -4,13 +4,13 @@ This is my own HQM server implementation. It attempts to recreate the physics as
 
 ## How to start
 
-You will need a configuration file to start, a default config.ini is provided. 
+You will need a TOML configuration file to start; a default `config.toml` is provided.
 
-Run `migo-hqm-server` to start the server with config.ini in the current working directory, or `migo-hqm-server <path-to-config>` to run with any compatible configuration file in your system.
+Run `migo-hqm-server` to start the server with `config.toml` in the current working directory, or `migo-hqm-server <path-to-config>` to run with any TOML configuration file in your system.
 
 ## How to configure
 
-config.ini is a good starting point, and contains the important available settings. It is divided into three sections.
+`config.toml` is a good starting point, and contains the important available settings. It is divided into three tables: `[server]`, `[game]`, and `[physics]`. Strings, such as rule and mode names, must be quoted; booleans and numbers must not be quoted.
 
 ### Server
 
@@ -40,7 +40,6 @@ config.ini is a good starting point, and contains the important available settin
 | spawn_offset           | (Match mode only) Distance that the center spawns from the middle of the faceoff circle in faceoffs, as a positive floating point value in meters.                                                                                                                                                                                        |
 | spawn_player_altitude  | (Match mode only) Height above ice where the players spawn in faceoffs, as a positive floating point value in meters.                                                                                                                                                                                                                     |
 | spawn_puck_altitude    | (Match mode only) Height above ice the puck spawns in faceoffs, as a positive floating point value in meters.                                                                                                                                                                                                                             |
-| limit_jump_speed       | If true, nerfs jump speed, effectively nerfing double-jumping. If false, it should work like vanilla.                                                                                                                                                                                                                                     |
 | offside                | Offside setting. Allowed values are "off" (default, no offside), "on", (offside rule enabled) and "immediate", which will call offside immediately instead of warning when the puck has entered the offensive zone in an offside situation.                                                                                               |
 | offsideline            | Offside line setting. Allowed values are "blue" (default, offensive blue line), and "center" (center line)                                                                                                                                                                                                                                |
 | icing                  | Icing setting. Allowed values are "off" (default, no icing), "on" (touch icing rule enabled) and "notouch" (no-touch icing rule enabled)                                                                                                                                                                                                  |
@@ -60,6 +59,7 @@ config.ini is a good starting point, and contains the important available settin
 ### Physics
 | Property                    | Explanation                                                                              |
 |-----------------------------|------------------------------------------------------------------------------------------|
+| limit_jump_speed            | If true, nerfs jump speed, effectively nerfing double-jumping. If false, it should work like vanilla. |
 | gravity                     | Gravitational acceleration in meters per second squared. Default is 6.80555.             |
 | player_acceleration         | Player acceleration in meters per second squared. Default is 2.08333.                    |
 | player_deceleration         | Player deceleration in meters per second squared. Default is 5.55555.                    |
