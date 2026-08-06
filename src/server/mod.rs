@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, BytesMut};
-use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt};
+use jiff::Timestamp;
 
 use glam::Vec3;
 use glamx::Rot3;
@@ -369,7 +369,7 @@ pub(crate) struct HQMServer {
 
     game_id: u32,
     pub is_muted: bool,
-    pub start_time: DateTime<Utc>,
+    pub start_time: Timestamp,
 
     has_current_game_been_active: bool,
 
@@ -1054,7 +1054,7 @@ impl HQMServer {
         }
 
         if !self.has_current_game_been_active {
-            self.start_time = Utc::now();
+            self.start_time = Timestamp::now();
             self.has_current_game_been_active = true;
             behaviour.game_started(self.into());
             info!("New game {} started", self.game_id);

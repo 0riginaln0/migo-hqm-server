@@ -18,7 +18,7 @@ reqwest = { version = "0.12", default-features=false, features = ["multipart", "
 tracing = "0.1"
 tracing-subscriber = {version="0.3", features = ["parking_lot"]}
 tracing-appender = "0.2"
-chrono = "0.4"
+jiff = "0.2"
 arrayvec = "0.7.4"
 smallvec = { version = "1.11", features = ["union", "const_generics"]}
 systemctl = "0.4"

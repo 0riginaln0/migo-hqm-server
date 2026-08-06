@@ -1,6 +1,6 @@
 use crate::ServerConfiguration;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -10,7 +10,7 @@ pub trait RecordingSaveMethod {
         &mut self,
         config: &ServerConfiguration,
         replay_data: Bytes,
-        start_time: DateTime<Utc>,
+        start_time: Timestamp,
     );
 }
 
@@ -29,9 +29,9 @@ impl RecordingSaveMethod for RecordingSaveToFile {
         &mut self,
         config: &ServerConfiguration,
         replay_data: Bytes,
-        start_time: DateTime<Utc>,
+        start_time: Timestamp,
     ) {
-        let time = start_time.format("%Y-%m-%dT%H%M%S").to_string();
+        let time = start_time.strftime("%Y-%m-%dT%H%M%S").to_string();
         let file_name = format!("{}.{}.hrp", config.server_name, time);
         let directory = self.directory.clone();
         let path = self.directory.join(&file_name);
@@ -73,11 +73,11 @@ impl RecordingSaveMethod for RecordingSendToHttpEndpoint {
         &mut self,
         config: &ServerConfiguration,
         replay_data: Bytes,
-        start_time: DateTime<Utc>,
+        start_time: Timestamp,
     ) {
         let client = self.client.clone();
         let server_name = config.server_name.clone();
-        let time = start_time.format("%Y-%m-%dT%H%M%S").to_string();
+        let time = start_time.strftime("%Y-%m-%dT%H%M%S").to_string();
         let file_name = format!("{}.{}.hrp", config.server_name, time);
         let form = reqwest::multipart::Form::new()
             .text("time", time)
